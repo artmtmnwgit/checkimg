@@ -1,14 +1,14 @@
 # Production: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 services:
   postgres:
-    ports: []
+    ports: !reset []
 
   redis:
-    ports: []
+    ports: !reset []
 
   api:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
-    ports: []
+    ports: !reset []
     volumes:
       - image_data:/app/data/images
 
@@ -17,7 +17,7 @@ services:
       - image_data:/app/data/images
 
   frontend:
-    ports: []
+    ports: !reset []
     environment:
       VITE_API_URL: ""
       VITE_PROXY_TARGET: http://api:8000

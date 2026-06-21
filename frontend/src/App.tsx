@@ -1,7 +1,29 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 
 // ponytail: empty VITE_API_URL = same-origin (/api via nginx or vite proxy)
 const API = (import.meta.env.VITE_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
+const AUTH_TOKEN_KEY = "checkimg_token";
+
+function getAuthToken(): string | null {
+  return localStorage.getItem(AUTH_TOKEN_KEY);
+}
+
+function setAuthToken(token: string | null) {
+  if (token) localStorage.setItem(AUTH_TOKEN_KEY, token);
+  else localStorage.removeItem(AUTH_TOKEN_KEY);
+}
+
+function authHeaders(extra?: HeadersInit): HeadersInit {
+  const token = getAuthToken();
+  return token ? { ...extra, Authorization: `Bearer ${token}` } : { ...extra };
+}
+
+async function apiFetch(path: string, init?: RequestInit) {
+  return fetch(`${API}${path}`, {
+    ...init,
+    headers: { "Content-Type": "application/json", ...authHeaders(init?.headers as HeadersInit) },
+  });
+}
 
 type RiskLevel =
   | "safe"
@@ -376,6 +398,22 @@ interface ScanOptionsDefaults {
   keys_configured: KeysConfigured;
 }
 
+interface UserInfo {
+  id: number;
+  email: string;
+}
+
+interface ScanHistoryItem {
+  id: number;
+  url: string;
+  status: ScanStatus;
+  depth: number;
+  pages_scanned: number;
+  images_found: number;
+  images_processed: number;
+  created_at: string;
+}
+
 interface ScanStatusResponse {
   id: number;
   url: string;
@@ -580,13 +618,58 @@ export default function App() {
   const [controlBusy, setControlBusy] = useState(false);
   const knownIds = useRef<Set<number>>(new Set());
 
+  const [user, setUser] = useState<UserInfo | null>(null);
+  const [authOpen, setAuthOpen] = useState(false);
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [history, setHistory] = useState<ScanHistoryItem[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [settingsBusy, setSettingsBusy] = useState(false);
+  const [settingsSaved, setSettingsSaved] = useState(false);
+
+  const loadUserSettings = useCallback(async () => {
+    const res = await apiFetch("/api/user/settings");
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data?.settings) setScanOptions(data.settings);
+    if (data?.keys_configured) setKeysConfigured(data.keys_configured);
+  }, []);
+
+  const loadHistory = useCallback(async () => {
+    const res = await apiFetch("/api/user/scans");
+    if (!res.ok) return;
+    const data = await res.json();
+    setHistory(data.items ?? []);
+  }, []);
+
+  const bootstrapAuth = useCallback(async () => {
+    if (!getAuthToken()) return;
+    const res = await apiFetch("/api/auth/me");
+    if (!res.ok) {
+      setAuthToken(null);
+      return;
+    }
+    const me: UserInfo = await res.json();
+    setUser(me);
+    await Promise.all([loadUserSettings(), loadHistory()]);
+  }, [loadHistory, loadUserSettings]);
+
+  useEffect(() => {
+    bootstrapAuth();
+  }, [bootstrapAuth]);
+
   useEffect(() => {
     fetch(`${API}/api/scan/options-defaults`)
       .then((r) => r.json())
       .then((data: ScanOptionsDefaults) => {
-        if (data?.defaults) {
+        if (data?.defaults && !getAuthToken()) {
           setDefaultOptions(data.defaults);
           setScanOptions(data.defaults);
+        } else if (data?.defaults) {
+          setDefaultOptions(data.defaults);
         }
         if (data?.presets?.fast) setFastPreset(data.presets.fast);
         if (data?.keys_configured) setKeysConfigured(data.keys_configured);
@@ -633,6 +716,66 @@ export default function App() {
       serpapi_key: prev.serpapi_key,
     }));
 
+  const saveSettings = async () => {
+    if (!user) return;
+    setSettingsBusy(true);
+    setSettingsSaved(false);
+    try {
+      const res = await apiFetch("/api/user/settings", {
+        method: "PUT",
+        body: JSON.stringify(scanOptions),
+      });
+      if (res.ok) {
+        setSettingsSaved(true);
+        setTimeout(() => setSettingsSaved(false), 2000);
+      }
+    } finally {
+      setSettingsBusy(false);
+    }
+  };
+
+  const submitAuth = async (e: FormEvent) => {
+    e.preventDefault();
+    setAuthError("");
+    setAuthBusy(true);
+    try {
+      const res = await fetch(`${API}/api/auth/${authMode}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: authEmail.trim(), password: authPassword }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        const detail = data.detail;
+        setAuthError(typeof detail === "string" ? detail : detail?.[0]?.msg ?? "Ошибка авторизации");
+        return;
+      }
+      setAuthToken(data.access_token);
+      setUser(data.user);
+      setAuthOpen(false);
+      setAuthPassword("");
+      await Promise.all([loadUserSettings(), loadHistory()]);
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const logout = () => {
+    setAuthToken(null);
+    setUser(null);
+    setHistory([]);
+    setHistoryOpen(false);
+    setScanOptions(defaultOptions);
+  };
+
+  const openHistoryScan = (id: number) => {
+    setScanId(id);
+    persistScanId(id);
+    setRestoredSession(true);
+    setResults(null);
+    setStatus(null);
+  };
+
   const startScan = async () => {
     const submittedUrl = url.trim();
     setLoading(true);
@@ -643,14 +786,14 @@ export default function App() {
     persistScanId(null);
     knownIds.current = new Set();
     try {
-      const res = await fetch(`${API}/api/scan`, {
+      const res = await apiFetch("/api/scan", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: submittedUrl, depth, options: scanOptions }),
       });
       const data = await res.json();
       setScanId(data.id);
       persistScanId(data.id);
+      if (user) loadHistory();
     } finally {
       setLoading(false);
     }
@@ -757,9 +900,81 @@ export default function App() {
   return (
     <div className="app">
       <header>
-        <h1>CheckImg</h1>
-        <p>Copyright image scanner for websites</p>
+        <div className="header-row">
+          <div>
+            <h1>CheckImg</h1>
+            <p>Copyright image scanner for websites</p>
+          </div>
+          <div className="auth-bar">
+            {user ? (
+              <>
+                <span className="auth-email">{user.email}</span>
+                <button type="button" className="btn-secondary" onClick={() => setHistoryOpen((v) => !v)}>
+                  История
+                </button>
+                <button type="button" className="btn-secondary" onClick={logout}>
+                  Выйти
+                </button>
+              </>
+            ) : (
+              <>
+                <span className="guest-hint">Без входа — проверка доступна, история не сохраняется</span>
+                <button type="button" className="btn-secondary" onClick={() => { setAuthMode("login"); setAuthOpen(true); }}>
+                  Войти
+                </button>
+                <button type="button" className="btn-primary-outline" onClick={() => { setAuthMode("register"); setAuthOpen(true); }}>
+                  Регистрация
+                </button>
+              </>
+            )}
+          </div>
+        </div>
       </header>
+
+      {authOpen && (
+        <div className="auth-modal-backdrop" onClick={() => setAuthOpen(false)}>
+          <form className="auth-modal" onClick={(e) => e.stopPropagation()} onSubmit={submitAuth}>
+            <h2>{authMode === "login" ? "Вход" : "Регистрация"}</h2>
+            <label>
+              Email
+              <input type="email" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} required autoComplete="email" />
+            </label>
+            <label>
+              Пароль
+              <input type="password" value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} required minLength={6} autoComplete={authMode === "login" ? "current-password" : "new-password"} />
+            </label>
+            {authError ? <p className="auth-error">{authError}</p> : null}
+            <div className="auth-modal-actions">
+              <button type="submit" disabled={authBusy}>{authMode === "login" ? "Войти" : "Зарегистрироваться"}</button>
+              <button type="button" className="btn-secondary" onClick={() => setAuthMode(authMode === "login" ? "register" : "login")}>
+                {authMode === "login" ? "Создать аккаунт" : "Уже есть аккаунт"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {user && historyOpen && (
+        <aside className="history-panel">
+          <h3>История проверок</h3>
+          {history.length === 0 ? (
+            <p className="history-empty">Пока нет сохранённых сканов</p>
+          ) : (
+            <ul className="history-list">
+              {history.map((item) => (
+                <li key={item.id}>
+                  <button type="button" className="history-item" onClick={() => openHistoryScan(item.id)}>
+                    <span className="history-url">{item.url}</span>
+                    <span className="history-meta">
+                      #{item.id} · {item.status} · {new Date(item.created_at).toLocaleString()}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </aside>
+      )}
 
       <form
         className="scan-form"
@@ -993,6 +1208,14 @@ export default function App() {
               </label>
             </fieldset>
           </div>
+          {user ? (
+            <div className="settings-save-row">
+              <button type="button" className="btn-secondary" disabled={settingsBusy} onClick={saveSettings}>
+                {settingsBusy ? "Сохранение…" : settingsSaved ? "Сохранено ✓" : "Сохранить настройки в ЛК"}
+              </button>
+              <span className="option-hint">Ключи API и фильтры сохраняются в аккаунте</span>
+            </div>
+          ) : null}
         </details>
         <button type="submit" disabled={loading || (isActive ?? false)}>
           {loading ? "Starting…" : "Start scan"}

@@ -4,8 +4,9 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session, joinedload
 
+from app.api.deps import get_optional_user
 from app.database import get_db
-from app.models import CopyrightCheck, Image, Page, RiskLevel, ScanStatus, SiteScan
+from app.models import CopyrightCheck, Image, Page, RiskLevel, ScanStatus, SiteScan, User
 from app.schemas.scan import (
     ExcludeImageRequest,
     ScanCreateRequest,
@@ -14,6 +15,7 @@ from app.schemas.scan import (
     ScanStatusResponse,
 )
 from app.schemas.scan_options import ScanOptionsDefaultsResponse
+from app.services.report import generate_scan_report
 from app.services.scan_options import options_to_json, public_scan_options, scan_options_defaults
 from app.services.tagging import render_tagged_image
 from app.tasks.scan_tasks import run_site_scan
@@ -30,12 +32,17 @@ def get_scan_options_defaults():
 
 
 @router.post("/scan", response_model=ScanCreateResponse)
-def create_scan(body: ScanCreateRequest, db: Session = Depends(get_db)):
+def create_scan(
+    body: ScanCreateRequest,
+    db: Session = Depends(get_db),
+    user: User | None = Depends(get_optional_user),
+):
     scan = SiteScan(
         url=str(body.url),
         depth=body.depth,
         status=ScanStatus.PENDING,
         scan_options=options_to_json(body.options),
+        user_id=user.id if user else None,
     )
     db.add(scan)
     db.commit()

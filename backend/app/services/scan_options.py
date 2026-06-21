@@ -165,3 +165,9 @@ def public_scan_options(raw: dict[str, Any] | None) -> dict[str, Any] | None:
     if not raw:
         return None
     return {k: v for k, v in raw.items() if k not in SCAN_API_KEYS}
+
+
+def user_settings_from_db(raw: dict[str, Any] | None, fallback: ScanOptions) -> ScanOptions:
+    if not raw:
+        return fallback
+    return ScanOptions.model_validate(raw)

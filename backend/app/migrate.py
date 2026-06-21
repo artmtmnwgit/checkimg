@@ -20,6 +20,7 @@ def apply_migrations(engine: Engine) -> None:
         ("site_scans", "dmca_site_data", _json_type(engine)),
         ("site_scans", "scan_options", _json_type(engine)),
         ("copyright_checks", "dmca_evidence", _json_type(engine)),
+        ("site_scans", "user_id", "INTEGER"),
     ]
 
     with engine.begin() as conn:
@@ -42,7 +43,7 @@ def apply_migrations(engine: Engine) -> None:
 
 def _fix_pg_sequences(conn) -> None:
     """Resync serial sequences after manual imports or failed transactions."""
-    tables = ("site_scans", "pages", "images", "copyright_checks", "exif_data")
+    tables = ("users", "site_scans", "pages", "images", "copyright_checks", "exif_data")
     for table in tables:
         conn.execute(
             text(

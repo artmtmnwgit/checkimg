@@ -52,6 +52,9 @@ class SiteScan(Base):
     __tablename__ = "site_scans"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     url: Mapped[str] = mapped_column(String(2048), nullable=False)
     depth: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
     status: Mapped[ScanStatus] = mapped_column(
@@ -73,6 +76,21 @@ class SiteScan(Base):
     )
 
     pages: Mapped[list["Page"]] = relationship(back_populates="scan", cascade="all, delete-orphan")
+    user: Mapped["User | None"] = relationship(back_populates="scans")
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    settings: Mapped[dict[str, Any] | None] = mapped_column(JsonType, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    scans: Mapped[list["SiteScan"]] = relationship(back_populates="user")
 
 
 class Page(Base):

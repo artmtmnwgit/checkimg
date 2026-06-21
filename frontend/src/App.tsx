@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
+// ponytail: empty VITE_API_URL = same-origin (/api via nginx or vite proxy)
+const API = (import.meta.env.VITE_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
 
 type RiskLevel =
   | "safe"

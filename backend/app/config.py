@@ -1,5 +1,7 @@
+import json
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -56,6 +58,22 @@ class Settings(BaseSettings):
     hf_watermark_threshold: float = 0.7
 
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, v):
+        if v is None or isinstance(v, list):
+            return v
+        if not isinstance(v, str):
+            return v
+        s = v.strip()
+        if not s:
+            return []
+        if s == "*":
+            return ["*"]
+        if s.startswith("["):
+            return json.loads(s)
+        return [p.strip() for p in s.split(",") if p.strip()]
 
 
 @lru_cache

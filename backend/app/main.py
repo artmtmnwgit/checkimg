@@ -21,10 +21,11 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="CheckImg", version="0.1.0", lifespan=lifespan)
+_cors_allow_all = "*" in settings.cors_origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins,
-    allow_credentials=True,
+    allow_origins=["*"] if _cors_allow_all else settings.cors_origins,
+    allow_credentials=not _cors_allow_all,
     allow_methods=["*"],
     allow_headers=["*"],
 )

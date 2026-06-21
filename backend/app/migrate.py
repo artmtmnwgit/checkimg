@@ -21,6 +21,7 @@ def apply_migrations(engine: Engine) -> None:
         ("site_scans", "scan_options", _json_type(engine)),
         ("copyright_checks", "dmca_evidence", _json_type(engine)),
         ("site_scans", "user_id", "INTEGER"),
+        ("site_scans", "token", "VARCHAR(64)"),
     ]
 
     with engine.begin() as conn:
@@ -37,8 +38,23 @@ def apply_migrations(engine: Engine) -> None:
             logger.info("migration: %s.%s", table, column)
             conn.execute(text(ddl))
 
+        _backfill_scan_tokens(conn)
+
         if dialect == "postgresql":
             _fix_pg_sequences(conn)
+
+
+def _backfill_scan_tokens(conn) -> None:
+    from app.services.scan_tokens import generate_scan_token
+
+    rows = conn.execute(text("SELECT id FROM site_scans WHERE token IS NULL OR token = ''")).fetchall()
+    for (sid,) in rows:
+        conn.execute(
+            text("UPDATE site_scans SET token = :t WHERE id = :id"),
+            {"t": generate_scan_token(), "id": sid},
+        )
+    if rows:
+        logger.info("migration: backfilled %s scan token(s)", len(rows))
 
 
 def _fix_pg_sequences(conn) -> None:

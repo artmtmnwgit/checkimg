@@ -1073,6 +1073,16 @@ header h1 {
   margin: 0;
 }
 
+.preview-placeholder {
+  background: #e2e8f0;
+  min-height: 120px;
+  border-radius: 6px;
+}
+
+.compare .preview-placeholder {
+  min-height: 200px;
+}
+
 .compare img {
   width: 100%;
   max-width: 100%;

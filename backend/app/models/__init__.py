@@ -68,6 +68,7 @@ class SiteScan(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     dmca_site_data: Mapped[dict[str, Any] | None] = mapped_column(JsonType, nullable=True)
     scan_options: Mapped[dict[str, Any] | None] = mapped_column(JsonType, nullable=True)
+    token: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

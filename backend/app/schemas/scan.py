@@ -16,14 +16,14 @@ class ScanCreateRequest(BaseModel):
 
 
 class ScanCreateResponse(BaseModel):
-    id: int
+    token: str
     status: ScanStatus
     url: str
     depth: int
 
 
 class ScanStatusResponse(BaseModel):
-    id: int
+    token: str
     url: str
     status: ScanStatus
     depth: int
@@ -78,7 +78,7 @@ class PageResultOut(BaseModel):
 
 
 class ScanResultsResponse(BaseModel):
-    scan_id: int
+    scan_token: str
     url: str
     status: ScanStatus
     pages: list[PageResultOut]

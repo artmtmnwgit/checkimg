@@ -3,6 +3,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 // ponytail: empty VITE_API_URL = same-origin (/api via nginx or vite proxy)
 const API = (import.meta.env.VITE_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
 const AUTH_TOKEN_KEY = "checkimg_token";
+const GUEST_SCAN_KEY = "checkimg_guest_scan";
+const SCAN_STORAGE_KEY = "checkimg_scan_token";
 
 function getAuthToken(): string | null {
   return localStorage.getItem(AUTH_TOKEN_KEY);
@@ -13,15 +15,51 @@ function setAuthToken(token: string | null) {
   else localStorage.removeItem(AUTH_TOKEN_KEY);
 }
 
+function getGuestScanToken(): string | null {
+  try {
+    return sessionStorage.getItem(GUEST_SCAN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function setGuestScanToken(token: string | null) {
+  try {
+    if (token) sessionStorage.setItem(GUEST_SCAN_KEY, token);
+    else sessionStorage.removeItem(GUEST_SCAN_KEY);
+  } catch {
+    /* ponytail: private mode */
+  }
+}
+
+function isScanToken(raw: string | null): raw is string {
+  return Boolean(raw && /^[A-Za-z0-9_-]{16,}$/.test(raw));
+}
+
 function authHeaders(extra?: HeadersInit): HeadersInit {
   const token = getAuthToken();
   return token ? { ...extra, Authorization: `Bearer ${token}` } : { ...extra };
+}
+
+function scanAccessHeaders(extra?: HeadersInit): HeadersInit {
+  const auth = getAuthToken();
+  if (auth) return { ...extra, Authorization: `Bearer ${auth}` };
+  const guest = getGuestScanToken();
+  if (guest) return { ...extra, "X-Scan-Token": guest };
+  return { ...extra };
 }
 
 async function apiFetch(path: string, init?: RequestInit) {
   return fetch(`${API}${path}`, {
     ...init,
     headers: { "Content-Type": "application/json", ...authHeaders(init?.headers as HeadersInit) },
+  });
+}
+
+async function scanFetch(path: string, init?: RequestInit) {
+  return fetch(`${API}${path}`, {
+    ...init,
+    headers: { "Content-Type": "application/json", ...scanAccessHeaders(init?.headers as HeadersInit) },
   });
 }
 
@@ -404,7 +442,7 @@ interface UserInfo {
 }
 
 interface ScanHistoryItem {
-  id: number;
+  token: string;
   url: string;
   status: ScanStatus;
   depth: number;
@@ -415,7 +453,7 @@ interface ScanHistoryItem {
 }
 
 interface ScanStatusResponse {
-  id: number;
+  token: string;
   url: string;
   status: ScanStatus;
   progress_pct: number;
@@ -445,7 +483,7 @@ interface PageResult {
 }
 
 interface ScanResults {
-  scan_id: number;
+  scan_token: string;
   status: ScanStatus;
   pages: PageResult[];
   summary: Record<string, number>;
@@ -455,47 +493,71 @@ type Filter = "all" | "violations" | "clean";
 type ViewMode = "grid" | "table";
 
 const ACTIVE: ScanStatus[] = ["pending", "in_progress", "paused"];
-const SCAN_STORAGE_KEY = "checkimg_scan_id";
 
-function readScanIdFromUrl(): number | null {
+function readScanTokenFromUrl(): string | null {
   const raw = new URLSearchParams(window.location.search).get("scan");
-  if (!raw) return null;
-  const id = Number(raw);
-  return Number.isFinite(id) && id > 0 ? id : null;
+  return isScanToken(raw) ? raw : null;
 }
 
-function readScanIdFromStorage(): number | null {
+function readScanTokenFromStorage(): string | null {
   try {
     const raw = localStorage.getItem(SCAN_STORAGE_KEY);
-    if (!raw) return null;
-    const id = Number(raw);
-    return Number.isFinite(id) && id > 0 ? id : null;
+    return isScanToken(raw) ? raw : null;
   } catch {
     return null;
   }
 }
 
-function persistScanId(id: number | null) {
+function persistScanToken(token: string | null, shareInUrl: boolean) {
   try {
-    if (id) {
-      localStorage.setItem(SCAN_STORAGE_KEY, String(id));
-    } else {
-      localStorage.removeItem(SCAN_STORAGE_KEY);
-    }
+    if (shareInUrl && token) localStorage.setItem(SCAN_STORAGE_KEY, token);
+    else localStorage.removeItem(SCAN_STORAGE_KEY);
   } catch {
     /* ponytail: private mode may block storage */
   }
   const u = new URL(window.location.href);
-  if (id) {
-    u.searchParams.set("scan", String(id));
-  } else {
-    u.searchParams.delete("scan");
-  }
+  if (shareInUrl && token) u.searchParams.set("scan", token);
+  else u.searchParams.delete("scan");
   window.history.replaceState({}, "", u);
 }
 
-function initialScanId(): number | null {
-  return readScanIdFromUrl() ?? readScanIdFromStorage();
+function initialScanToken(): string | null {
+  if (getAuthToken()) return readScanTokenFromUrl() ?? readScanTokenFromStorage();
+  return getGuestScanToken();
+}
+
+function PreviewImg({
+  scanToken,
+  imageId,
+  alt,
+  className,
+}: {
+  scanToken: string;
+  imageId: number;
+  alt?: string;
+  className?: string;
+}) {
+  const [src, setSrc] = useState<string | null>(null);
+
+  useEffect(() => {
+    let blobUrl: string | null = null;
+    let cancelled = false;
+    scanFetch(`/api/preview/${scanToken}/${imageId}`)
+      .then((res) => (res.ok ? res.blob() : null))
+      .then((blob) => {
+        if (!blob || cancelled) return;
+        blobUrl = URL.createObjectURL(blob);
+        setSrc(blobUrl);
+      })
+      .catch(() => setSrc(null));
+    return () => {
+      cancelled = true;
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+    };
+  }, [scanToken, imageId]);
+
+  if (!src) return <div className={`preview-placeholder ${className ?? ""}`} />;
+  return <img src={src} alt={alt ?? ""} className={className} />;
 }
 
 const EMPTY_API_KEYS = {
@@ -592,7 +654,7 @@ function isFastScanOptions(o: ScanOptions): boolean {
 }
 
 export default function App() {
-  const bootScanId = useRef(initialScanId());
+  const bootScanToken = useRef(initialScanToken());
   const [url, setUrl] = useState("https://example.com");
   const [depth, setDepth] = useState(3);
   const [scanOptions, setScanOptions] = useState<ScanOptions>(FALLBACK_SCAN_OPTIONS);
@@ -606,8 +668,8 @@ export default function App() {
     serpapi: false,
   });
   const [optionsOpen, setOptionsOpen] = useState(false);
-  const [scanId, setScanId] = useState<number | null>(() => bootScanId.current);
-  const [restoredSession, setRestoredSession] = useState(() => bootScanId.current !== null);
+  const [scanToken, setScanToken] = useState<string | null>(() => bootScanToken.current);
+  const [restoredSession, setRestoredSession] = useState(() => bootScanToken.current !== null);
   const [status, setStatus] = useState<ScanStatusResponse | null>(null);
   const [results, setResults] = useState<ScanResults | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
@@ -660,6 +722,12 @@ export default function App() {
   useEffect(() => {
     bootstrapAuth();
   }, [bootstrapAuth]);
+
+  useEffect(() => {
+    if (!user) return;
+    const saved = readScanTokenFromUrl() ?? readScanTokenFromStorage();
+    if (saved) setScanToken(saved);
+  }, [user]);
 
   useEffect(() => {
     fetch(`${API}/api/scan/options-defaults`)
@@ -766,11 +834,16 @@ export default function App() {
     setHistory([]);
     setHistoryOpen(false);
     setScanOptions(defaultOptions);
+    setScanToken(null);
+    setGuestScanToken(null);
+    persistScanToken(null, false);
+    setStatus(null);
+    setResults(null);
   };
 
-  const openHistoryScan = (id: number) => {
-    setScanId(id);
-    persistScanId(id);
+  const openHistoryScan = (token: string) => {
+    setScanToken(token);
+    persistScanToken(token, true);
     setRestoredSession(true);
     setResults(null);
     setStatus(null);
@@ -782,28 +855,33 @@ export default function App() {
     setResults(null);
     setStatus(null);
     setRestoredSession(false);
-    setScanId(null);
-    persistScanId(null);
+    setScanToken(null);
+    setGuestScanToken(null);
+    persistScanToken(null, false);
     knownIds.current = new Set();
     try {
-      const res = await apiFetch("/api/scan", {
+      const res = await scanFetch("/api/scan", {
         method: "POST",
         body: JSON.stringify({ url: submittedUrl, depth, options: scanOptions }),
       });
       const data = await res.json();
-      setScanId(data.id);
-      persistScanId(data.id);
-      if (user) loadHistory();
+      setScanToken(data.token);
+      if (user) {
+        persistScanToken(data.token, true);
+        loadHistory();
+      } else {
+        setGuestScanToken(data.token);
+      }
     } finally {
       setLoading(false);
     }
   };
 
   const scanControl = async (action: "pause" | "resume" | "stop") => {
-    if (!scanId) return;
+    if (!scanToken) return;
     setControlBusy(true);
     try {
-      await fetch(`${API}/api/scan/${scanId}/${action}`, { method: "POST" });
+      await scanFetch(`/api/scan/${scanToken}/${action}`, { method: "POST" });
       await poll();
     } finally {
       setControlBusy(false);
@@ -811,11 +889,12 @@ export default function App() {
   };
 
   const poll = useCallback(async () => {
-    if (!scanId) return;
-    const res = await fetch(`${API}/api/scan/${scanId}`);
-    if (res.status === 404) {
-      persistScanId(null);
-      setScanId(null);
+    if (!scanToken) return;
+    const res = await scanFetch(`/api/scan/${scanToken}`);
+    if (res.status === 404 || res.status === 403) {
+      persistScanToken(null, Boolean(user));
+      setGuestScanToken(null);
+      setScanToken(null);
       setStatus(null);
       setResults(null);
       setRestoredSession(false);
@@ -826,25 +905,25 @@ export default function App() {
 
     const live = ACTIVE.includes(s.status) || s.status === "cancelled";
     if (live || s.status === "done" || s.status === "failed") {
-      const r: ScanResults = await fetch(`${API}/api/scan/${scanId}/results`).then((res) => res.json());
+      const r: ScanResults = await scanFetch(`/api/scan/${scanToken}/results`).then((res) => res.json());
       setResults(r);
     }
     if (!ACTIVE.includes(s.status)) {
       setRestoredSession(false);
     }
-  }, [scanId]);
+  }, [scanToken, user]);
 
   useEffect(() => {
-    if (scanId) persistScanId(scanId);
-  }, [scanId]);
+    if (scanToken && user) persistScanToken(scanToken, true);
+  }, [scanToken, user]);
 
   useEffect(() => {
-    if (!scanId) return;
+    if (!scanToken) return;
     poll();
     const ms = status && ACTIVE.includes(status.status) ? 800 : 2000;
     const t = setInterval(poll, ms);
     return () => clearInterval(t);
-  }, [scanId, poll, status?.status]);
+  }, [scanToken, poll, status?.status]);
 
   const flatImages = useMemo(() => {
     if (!results) return [];
@@ -962,11 +1041,11 @@ export default function App() {
           ) : (
             <ul className="history-list">
               {history.map((item) => (
-                <li key={item.id}>
-                  <button type="button" className="history-item" onClick={() => openHistoryScan(item.id)}>
+                <li key={item.token}>
+                  <button type="button" className="history-item" onClick={() => openHistoryScan(item.token)}>
                     <span className="history-url">{item.url}</span>
                     <span className="history-meta">
-                      #{item.id} · {item.status} · {new Date(item.created_at).toLocaleString()}
+                      {item.status} · {new Date(item.created_at).toLocaleString()}
                     </span>
                   </button>
                 </li>
@@ -1224,7 +1303,7 @@ export default function App() {
 
       {restoredSession && status && ACTIVE.includes(status.status) && (
         <p className="reconnect-notice">
-          Восстановлено подключение к скану #{status.id} ({status.url}). Проверка идёт на сервере — обновление
+          Восстановлено подключение к скану ({status.url}). Проверка идёт на сервере — обновление
           страницы её не останавливает. Нажмите Stop, чтобы прервать.
           <button type="button" className="link-btn" onClick={() => setRestoredSession(false)}>
             Скрыть
@@ -1235,7 +1314,7 @@ export default function App() {
       {status && (
         <div className="progress">
           <div className="progress-row">
-            <strong>Scan #{status.id}</strong>
+            <strong>{status.url}</strong>
             {status.scan_options && isFastScanOptions(status.scan_options) && (
               <span className="scan-mode-tag">режим: быстрый</span>
             )}
@@ -1335,11 +1414,7 @@ export default function App() {
                   onClick={() => checked && setSelected(img)}
                   title={flagged ? getReasons(img.copyright_check).join("\n") : checked ? undefined : "Проверяется…"}
                 >
-                  <img
-                    src={`${API}/api/preview/${results.scan_id}/${img.id}`}
-                    alt={img.alt_text ?? ""}
-                    loading="lazy"
-                  />
+                  <PreviewImg scanToken={results.scan_token} imageId={img.id} alt={img.alt_text ?? ""} />
                   <div className="card-body">
                     <span className={`badge ${risk}`}>
                       {checked ? (RISK_LABELS[risk as RiskLevel] ?? risk) : "checking…"}
@@ -1391,11 +1466,7 @@ export default function App() {
                           rel="noreferrer"
                           onClick={(e) => e.stopPropagation()}
                         >
-                          <img
-                            src={`${API}/api/preview/${results!.scan_id}/${img.id}`}
-                            alt=""
-                            loading="lazy"
-                          />
+                          <PreviewImg scanToken={results!.scan_token} imageId={img.id} alt="" />
                         </a>
                       </div>
                       <div className="cell-page" role="cell">
@@ -1524,7 +1595,7 @@ export default function App() {
             <div className="compare compare-triple">
               <div className="compare-col">
                 <h3>На сайте</h3>
-                <img src={`${API}/api/preview/${results.scan_id}/${selected.id}`} alt="" />
+                <PreviewImg scanToken={results.scan_token} imageId={selected.id} alt="" />
                 <a className="modal-link" href={selected.src_url} target="_blank" rel="noreferrer">
                   {selected.src_url}
                 </a>

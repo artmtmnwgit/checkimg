@@ -12,7 +12,7 @@ class UserSettingsResponse(BaseModel):
 
 
 class ScanHistoryItem(BaseModel):
-    id: int
+    token: str
     url: str
     status: ScanStatus
     depth: int

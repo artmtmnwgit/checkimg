@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session, joinedload
 
-from app.api.deps import get_optional_user
+from app.api.deps import get_optional_user, get_owned_scan
 from app.database import get_db
 from app.models import CopyrightCheck, Image, Page, RiskLevel, ScanStatus, SiteScan, User
 from app.schemas.scan import (
@@ -17,10 +17,43 @@ from app.schemas.scan import (
 from app.schemas.scan_options import ScanOptionsDefaultsResponse
 from app.services.report import generate_scan_report
 from app.services.scan_options import options_to_json, public_scan_options, scan_options_defaults
+from app.services.scan_tokens import generate_scan_token
 from app.services.tagging import render_tagged_image
 from app.tasks.scan_tasks import run_site_scan
 
 router = APIRouter(prefix="/api", tags=["scan"])
+
+
+def _progress_pct(scan: SiteScan) -> float:
+    if scan.status == ScanStatus.DONE:
+        return 100.0 if scan.images_found > 0 else (100.0 if scan.pages_scanned > 0 else 0.0)
+    if scan.status == ScanStatus.FAILED:
+        return 0.0
+    if scan.status in (ScanStatus.IN_PROGRESS, ScanStatus.PAUSED):
+        if scan.images_found > 0:
+            return round(100.0 * scan.images_processed / scan.images_found, 1)
+        if scan.pages_scanned > 0:
+            return round(min(15.0, scan.pages_scanned * 5), 1)
+        return 0.0
+    if scan.status == ScanStatus.CANCELLED and scan.images_found > 0:
+        return round(100.0 * scan.images_processed / scan.images_found, 1)
+    return 0.0
+
+
+def _status_response(scan: SiteScan) -> ScanStatusResponse:
+    return ScanStatusResponse(
+        token=scan.token,
+        url=scan.url,
+        status=scan.status,
+        depth=scan.depth,
+        scan_options=public_scan_options(scan.scan_options),
+        pages_scanned=scan.pages_scanned,
+        images_found=scan.images_found,
+        images_processed=scan.images_processed,
+        progress_pct=_progress_pct(scan),
+        error_message=scan.error_message,
+        created_at=scan.created_at,
+    )
 
 
 @router.get("/scan/options-defaults", response_model=ScanOptionsDefaultsResponse)
@@ -43,23 +76,21 @@ def create_scan(
         status=ScanStatus.PENDING,
         scan_options=options_to_json(body.options),
         user_id=user.id if user else None,
+        token=generate_scan_token(),
     )
     db.add(scan)
     db.commit()
     db.refresh(scan)
     run_site_scan.delay(scan.id)
-    return ScanCreateResponse(id=scan.id, status=scan.status, url=scan.url, depth=scan.depth)
+    return ScanCreateResponse(token=scan.token, status=scan.status, url=scan.url, depth=scan.depth)
 
 
 def _active_scan_status(status: ScanStatus) -> bool:
     return status in (ScanStatus.IN_PROGRESS, ScanStatus.PAUSED)
 
 
-@router.post("/scan/{scan_id}/pause")
-def pause_scan(scan_id: int, db: Session = Depends(get_db)):
-    scan = db.get(SiteScan, scan_id)
-    if not scan:
-        raise HTTPException(404, "Scan not found")
+@router.post("/scan/{scan_token}/pause")
+def pause_scan(scan: SiteScan = Depends(get_owned_scan), db: Session = Depends(get_db)):
     if scan.status != ScanStatus.IN_PROGRESS:
         raise HTTPException(409, "Scan is not running")
     scan.status = ScanStatus.PAUSED
@@ -67,11 +98,8 @@ def pause_scan(scan_id: int, db: Session = Depends(get_db)):
     return {"ok": True, "status": scan.status}
 
 
-@router.post("/scan/{scan_id}/resume")
-def resume_scan(scan_id: int, db: Session = Depends(get_db)):
-    scan = db.get(SiteScan, scan_id)
-    if not scan:
-        raise HTTPException(404, "Scan not found")
+@router.post("/scan/{scan_token}/resume")
+def resume_scan(scan: SiteScan = Depends(get_owned_scan), db: Session = Depends(get_db)):
     if scan.status != ScanStatus.PAUSED:
         raise HTTPException(409, "Scan is not paused")
     scan.status = ScanStatus.IN_PROGRESS
@@ -79,11 +107,8 @@ def resume_scan(scan_id: int, db: Session = Depends(get_db)):
     return {"ok": True, "status": scan.status}
 
 
-@router.post("/scan/{scan_id}/stop")
-def stop_scan(scan_id: int, db: Session = Depends(get_db)):
-    scan = db.get(SiteScan, scan_id)
-    if not scan:
-        raise HTTPException(404, "Scan not found")
+@router.post("/scan/{scan_token}/stop")
+def stop_scan(scan: SiteScan = Depends(get_owned_scan), db: Session = Depends(get_db)):
     if not _active_scan_status(scan.status):
         raise HTTPException(409, "Scan is not active")
     scan.status = ScanStatus.CANCELLED
@@ -91,56 +116,20 @@ def stop_scan(scan_id: int, db: Session = Depends(get_db)):
     return {"ok": True, "status": scan.status}
 
 
-@router.get("/scan/{scan_id}", response_model=ScanStatusResponse)
-def get_scan_status(scan_id: int, db: Session = Depends(get_db)):
-    scan = db.get(SiteScan, scan_id)
-    if not scan:
-        raise HTTPException(404, "Scan not found")
-
-    if scan.status == ScanStatus.DONE:
-        progress = 100.0 if scan.images_found > 0 else (100.0 if scan.pages_scanned > 0 else 0.0)
-    elif scan.status == ScanStatus.FAILED:
-        progress = 0.0
-    elif scan.status in (ScanStatus.IN_PROGRESS, ScanStatus.PAUSED):
-        if scan.images_found > 0:
-            progress = round(100.0 * scan.images_processed / scan.images_found, 1)
-        elif scan.pages_scanned > 0:
-            progress = round(min(15.0, scan.pages_scanned * 5), 1)
-        else:
-            progress = 0.0
-    elif scan.status == ScanStatus.CANCELLED and scan.images_found > 0:
-        progress = round(100.0 * scan.images_processed / scan.images_found, 1)
-    else:
-        progress = 0.0
-
-    return ScanStatusResponse(
-        id=scan.id,
-        url=scan.url,
-        status=scan.status,
-        depth=scan.depth,
-        scan_options=public_scan_options(scan.scan_options),
-        pages_scanned=scan.pages_scanned,
-        images_found=scan.images_found,
-        images_processed=scan.images_processed,
-        progress_pct=progress,
-        error_message=scan.error_message,
-        created_at=scan.created_at,
-    )
+@router.get("/scan/{scan_token}", response_model=ScanStatusResponse)
+def get_scan_status(scan: SiteScan = Depends(get_owned_scan)):
+    return _status_response(scan)
 
 
-@router.get("/scan/{scan_id}/results", response_model=ScanResultsResponse)
-def get_scan_results(scan_id: int, db: Session = Depends(get_db)):
-    scan = db.get(SiteScan, scan_id)
-    if not scan:
-        raise HTTPException(404, "Scan not found")
-
+@router.get("/scan/{scan_token}/results", response_model=ScanResultsResponse)
+def get_scan_results(scan: SiteScan = Depends(get_owned_scan), db: Session = Depends(get_db)):
     pages = (
         db.query(Page)
         .options(
             joinedload(Page.images).joinedload(Image.copyright_check),
             joinedload(Page.images).joinedload(Image.exif_data),
         )
-        .filter(Page.scan_id == scan_id)
+        .filter(Page.scan_id == scan.id)
         .all()
     )
 
@@ -152,7 +141,7 @@ def get_scan_results(scan_id: int, db: Session = Depends(get_db)):
             summary[img.copyright_check.risk_level.value] += 1
 
     return ScanResultsResponse(
-        scan_id=scan.id,
+        scan_token=scan.token,
         url=scan.url,
         status=scan.status,
         pages=pages,
@@ -160,13 +149,18 @@ def get_scan_results(scan_id: int, db: Session = Depends(get_db)):
     )
 
 
-@router.get("/preview/{scan_id}/{image_id}")
-def get_preview(scan_id: int, image_id: int, format: str = "image", db: Session = Depends(get_db)):
+@router.get("/preview/{scan_token}/{image_id}")
+def get_preview(
+    image_id: int,
+    format: str = "image",
+    scan: SiteScan = Depends(get_owned_scan),
+    db: Session = Depends(get_db),
+):
     image = (
         db.query(Image)
         .join(Page)
         .options(joinedload(Image.copyright_check))
-        .filter(Image.id == image_id, Page.scan_id == scan_id)
+        .filter(Image.id == image_id, Page.scan_id == scan.id)
         .first()
     )
     if not image:
@@ -206,31 +200,31 @@ def get_preview(scan_id: int, image_id: int, format: str = "image", db: Session 
     return Response(content=data, media_type="image/jpeg")
 
 
-@router.post("/scan/{scan_id}/report")
-def create_report(scan_id: int, db: Session = Depends(get_db)):
+@router.post("/scan/{scan_token}/report")
+def create_report(scan: SiteScan = Depends(get_owned_scan), db: Session = Depends(get_db)):
     try:
-        pdf = generate_scan_report(db, scan_id)
+        pdf = generate_scan_report(db, scan.id)
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
     return Response(
         content=pdf,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="scan-{scan_id}-report.pdf"'},
+        headers={"Content-Disposition": f'attachment; filename="scan-{scan.token[:12]}-report.pdf"'},
     )
 
 
-@router.post("/scan/{scan_id}/images/{image_id}/exclude")
+@router.post("/scan/{scan_token}/images/{image_id}/exclude")
 def exclude_image(
-    scan_id: int,
     image_id: int,
     body: ExcludeImageRequest,
+    scan: SiteScan = Depends(get_owned_scan),
     db: Session = Depends(get_db),
 ):
     check = (
         db.query(CopyrightCheck)
         .join(Image)
         .join(Page)
-        .filter(Image.id == image_id, Page.scan_id == scan_id)
+        .filter(Image.id == image_id, Page.scan_id == scan.id)
         .first()
     )
     if not check:

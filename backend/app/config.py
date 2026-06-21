@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     dmca_external_timeout_sec: float = 8.0
     check_concurrency: int = 4
 
+    check_cache_enabled: bool = True
+    check_cache_ttl_sec: int = 7 * 24 * 3600  # ponytail: 7d; bump via CHECK_CACHE_TTL_SEC
+
     match_verify_enabled: bool = True
     match_verify_top_n: int = 4
     match_verify_concurrency: int = 3

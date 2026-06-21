@@ -14,6 +14,13 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import SessionLocal
 from app.models import CopyrightCheck, Image, Page, PageStatus, RiskLevel, SiteScan
+from app.services.check_cache import (
+    get_cached_evidence,
+    get_in_scan_cache,
+    set_cached_evidence,
+    set_in_scan_cache,
+    unpack_cached_bundle,
+)
 from app.services.copyright_checker import gather_external_evidence, persist_copyright_check
 from app.services.image_filters import passes_dimension_filter
 from app.services.scan_options import EffectiveScanOptions, ScanImageFilters, ScanSecrets
@@ -269,6 +276,23 @@ async def _check_one_image(
         _insert_image, scan_id, page_id, img_url, local, file_hash
     )
 
+    bundle = get_in_scan_cache(ctx, file_hash, ctx["opts"])
+    if bundle is None:
+        bundle = await asyncio.to_thread(get_cached_evidence, file_hash, ctx["opts"])
+
+    if bundle:
+        ctx["cache_hits_box"][0] += 1
+        fusion, exif, wm, dmca, ai = unpack_cached_bundle(
+            bundle, str(local), ctx["site_domain"], ctx.get("site_signals")
+        )
+        try:
+            await asyncio.to_thread(_persist_check, scan_id, image_id, fusion, exif, wm, dmca, ai)
+        except Exception as exc:
+            logger.exception("cached persist failed for %s: %s", img_url, exc)
+            await asyncio.to_thread(_fallback_check, image_id, str(exc))
+            await asyncio.to_thread(_increment_processed, scan_id)
+        return
+
     async with check_sem:
         try:
             fusion, exif, wm, dmca, ai = await gather_external_evidence(
@@ -286,6 +310,10 @@ async def _check_one_image(
             await asyncio.to_thread(_fallback_check, image_id, str(exc))
             await asyncio.to_thread(_increment_processed, scan_id)
             return
+
+    evidence = {"fusion": fusion, "exif": exif, "wm": wm, "dmca": dmca, "ai": ai}
+    set_in_scan_cache(ctx, file_hash, ctx["opts"], evidence)
+    await asyncio.to_thread(set_cached_evidence, file_hash, ctx["opts"], evidence)
 
     try:
         await asyncio.to_thread(
@@ -361,6 +389,7 @@ async def _crawl_pipeline(db: Session, scan: SiteScan) -> dict:
     opts = EffectiveScanOptions.for_scan(scan)
     secrets = ScanSecrets.for_scan(scan)
     img_filters = ScanImageFilters.for_scan(scan)
+    cache_hits_box: list[int] = [0]
 
     async with aiohttp.ClientSession(headers=BROWSER_HEADERS) as session:
         check_sem = asyncio.Semaphore(settings.check_concurrency)
@@ -391,6 +420,7 @@ async def _crawl_pipeline(db: Session, scan: SiteScan) -> dict:
             "opts": opts,
             "secrets": secrets,
             "img_filters": img_filters,
+            "cache_hits_box": cache_hits_box,
         }
 
         while queue and pages_scanned < settings.crawl_max_pages:
@@ -505,6 +535,9 @@ async def _crawl_pipeline(db: Session, scan: SiteScan) -> dict:
 
     db.expire(scan)
     fresh = db.get(SiteScan, scan.id)
+    hits = cache_hits_box[0]
+    if hits:
+        logger.info("scan %s: %s image check(s) served from cache", scan.id, hits)
     return {
         "pages_scanned": pages_scanned,
         "pages_failed": pages_failed,

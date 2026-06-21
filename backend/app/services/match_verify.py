@@ -12,6 +12,7 @@ import httpx
 from app.config import get_settings
 from app.services.scan_options import EffectiveScanOptions
 from app.services.image_similarity import compare_image_bytes
+from app.services.url_clean import is_self_image_match
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -52,12 +53,18 @@ async def _score_one(
     client: httpx.AsyncClient,
     local_path: str,
     match: dict[str, Any],
+    source_url: str | None = None,
 ) -> dict[str, Any]:
     out = dict(match)
     url = match.get("url") or ""
     out["match_kind"] = "unverified"
     out["similarity_score"] = None
     out["verify_note"] = None
+
+    if source_url and is_self_image_match(source_url, url):
+        out["match_kind"] = "weak"
+        out["verify_note"] = "self_match"
+        return out
 
     if not url or not _looks_like_image_url(url):
         out["verify_note"] = "page_url_not_image"
@@ -123,6 +130,7 @@ async def verify_fusion_matches(
     local_path: str,
     fusion: dict[str, Any],
     opts: EffectiveScanOptions | None = None,
+    source_image_url: str | None = None,
 ) -> dict[str, Any]:
     """Annotate fusion with visual similarity; filter weak lookalikes."""
     opts = opts or EffectiveScanOptions.from_settings()
@@ -147,7 +155,7 @@ async def verify_fusion_matches(
     async def _run(m: dict) -> dict:
         async with sem:
             async with httpx.AsyncClient(follow_redirects=True, headers=BROWSER_HEADERS) as client:
-                return await _score_one(client, local_path, m)
+                return await _score_one(client, local_path, m, source_image_url)
 
     scored = list(await asyncio.gather(*[_run(m) for m in candidates]))
     by_url = {m["url"]: m for m in scored if m.get("url")}

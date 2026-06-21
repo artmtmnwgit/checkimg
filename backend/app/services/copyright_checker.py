@@ -318,7 +318,7 @@ async def gather_external_evidence(
         try:
             raw = await multi_engine_reverse_search(image_url, opts, serpapi_key=secrets.serpapi_key)
             if local_path and opts.match_verify:
-                return await verify_fusion_matches(local_path, raw, opts)
+                return await verify_fusion_matches(local_path, raw, opts, image_url)
             return raw
         except Exception as exc:
             logger.warning("reverse search failed for %s: %s", image_url, exc)

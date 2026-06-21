@@ -84,3 +84,22 @@ def canonical_page_url(url: str) -> str:
     if netloc.startswith("www."):
         netloc = netloc[4:]
     return urlunparse((parsed.scheme.lower(), netloc, path, "", parsed.query, ""))
+
+
+def is_self_image_match(source_url: str, match_url: str) -> bool:
+    """True when reverse-search hit is the same asset we submitted (Yandex often returns the source URL)."""
+    src = clean_http_url(source_url)
+    dst = clean_http_url(match_url)
+    if not src or not dst:
+        return False
+    if src == dst:
+        return True
+    sp, mp = urlparse(src), urlparse(dst)
+    host = lambda p: p.netloc.lower().removeprefix("www.")
+    if host(sp) != host(mp):
+        return False
+    # ponytail: same filename on same host — Bitrix resize_cache vs /upload/iblock/…/file.png
+    name = sp.path.rsplit("/", 1)[-1].lower()
+    if not name or name != mp.path.rsplit("/", 1)[-1].lower():
+        return False
+    return name.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif"))

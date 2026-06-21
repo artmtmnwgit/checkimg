@@ -11,7 +11,7 @@ from app.config import get_settings
 from app.services.http_json import parse_response_json
 from app.services.scan_options import EffectiveScanOptions
 from app.services.source_types import DANGER_SITE_TYPES, classify_domain
-from app.services.url_clean import clean_http_url
+from app.services.url_clean import clean_http_url, is_self_image_match
 from app.services.yandex_search import search_yandex
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,41 @@ def _dedupe(all_matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
             seen.add(u)
             out.append(m)
     return out
+
+
+def _filter_self_matches(image_url: str, matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [m for m in matches if not is_self_image_match(image_url, m.get("url") or "")]
+
+
+def _rebuild_google_engine(eng: dict[str, Any]) -> dict[str, Any]:
+    eng = dict(eng)
+    matches = eng.get("matches") or []
+    eng["matches"] = matches
+    eng["match_count"] = len(matches)
+    stock = [m for m in matches if m.get("is_stock")]
+    best = stock[0] if stock else (matches[0] if matches else None)
+    eng["best_match_url"] = best.get("url") if best else None
+    eng["title"] = best.get("title") if best else None
+    eng["best_site_type"] = best.get("site_type") if best else None
+    eng["stock_hits"] = stock
+    for key in ("best_match_kind", "best_similarity_score", "exact_count", "similar_count"):
+        eng.pop(key, None)
+    return eng
+
+
+def _rebuild_yandex_engine(eng: dict[str, Any]) -> dict[str, Any]:
+    eng = dict(eng)
+    matches = eng.get("matches") or []
+    eng["matches"] = matches
+    eng["match_count"] = len(matches)
+    stock = [m for m in matches if m.get("is_stock")]
+    best = stock[0] if stock else (matches[0] if matches else None)
+    eng["best_match_url"] = best.get("url") if best else None
+    eng["best_site_type"] = best.get("site_type") if best else None
+    eng["stock_hits"] = stock
+    for key in ("best_match_kind", "best_similarity_score", "exact_count", "similar_count"):
+        eng.pop(key, None)
+    return eng
 
 
 async def search_google_lens(image_url: str) -> dict[str, Any]:
@@ -186,6 +221,13 @@ async def multi_engine_reverse_search(
             google = res
         else:
             yandex = res
+
+    google = _rebuild_google_engine(
+        {**google, "matches": _filter_self_matches(image_url, google.get("matches") or [])}
+    )
+    yandex = _rebuild_yandex_engine(
+        {**yandex, "matches": _filter_self_matches(image_url, yandex.get("matches") or [])}
+    )
 
     all_matches = _dedupe((google.get("matches") or []) + (yandex.get("matches") or []))
     stock_hits = [m for m in all_matches if m.get("is_stock")]

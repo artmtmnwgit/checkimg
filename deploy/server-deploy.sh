@@ -10,10 +10,12 @@ elif grep -q '^AUTH_SECRET=change-me-in-production' .env; then
   sed -i "s/^AUTH_SECRET=.*/AUTH_SECRET=$(openssl rand -hex 32)/" .env
 fi
 
-docker compose up -d --build api worker frontend
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build api worker frontend nginx
 
 sleep 10
-curl -sf http://127.0.0.1:8000/health
+curl -sf http://127.0.0.1/health
 echo
-curl -sf http://127.0.0.1:8000/api/auth/me -H "Authorization: Bearer bad" -o /dev/null -w "auth route: %{http_code}\n" || true
-docker compose ps --format "table {{.Name}}\t{{.Status}}"
+curl -sf http://127.0.0.1:8000/health || true
+echo
+curl -sf http://127.0.0.1/api/auth/me -H "Authorization: Bearer bad" -o /dev/null -w "auth via :80: %{http_code}\n" || true
+docker compose -f docker-compose.yml -f docker-compose.prod.yml ps --format "table {{.Name}}\t{{.Status}}\t{{.Ports}}"

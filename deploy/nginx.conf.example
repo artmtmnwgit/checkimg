@@ -1,9 +1,14 @@
-# CheckImg — один домен, без CORS.
-# UI:  http://checkimg.play2go.cloud/
-# API: http://checkimg.play2go.cloud/api/
+# CheckImg — один домен на порту 80.
 #
-# docker-compose: VITE_API_URL=  (пусто), VITE_PROXY_TARGET=http://api:8000
-# .env: CORS_ORIGINS=*  (или не нужен при same-origin)
+# Docker (рекомендуется на проде):
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#   nginx слушает :80 → frontend:5173, /api/ → api:8000
+#   Конфиг: deploy/nginx-docker.conf
+#
+# Или nginx на хосте (если без docker-nginx):
+#   UI:  http://checkimg.play2go.cloud/
+#   API: http://checkimg.play2go.cloud/api/
+#   docker-compose.prod.yml: VITE_API_URL= (пусто)
 
 server {
     listen 80;

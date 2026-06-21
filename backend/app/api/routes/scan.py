@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session, joinedload
 
-from app.api.deps import get_optional_user, get_owned_scan
+from app.api.deps import get_accessible_scan, get_controllable_scan, get_optional_user, get_owner_scan
 from app.database import get_db
 from app.models import CopyrightCheck, Image, Page, RiskLevel, ScanStatus, SiteScan, User
 from app.schemas.scan import (
@@ -13,6 +13,7 @@ from app.schemas.scan import (
     ScanCreateResponse,
     ScanResultsResponse,
     ScanStatusResponse,
+    ShareScanResponse,
 )
 from app.schemas.scan_options import ScanOptionsDefaultsResponse
 from app.services.report import generate_scan_report
@@ -46,6 +47,8 @@ def _status_response(scan: SiteScan) -> ScanStatusResponse:
         url=scan.url,
         status=scan.status,
         depth=scan.depth,
+        depth_reached=scan.depth_reached or 0,
+        share_enabled=scan.share_enabled,
         scan_options=public_scan_options(scan.scan_options),
         pages_scanned=scan.pages_scanned,
         images_found=scan.images_found,
@@ -90,7 +93,7 @@ def _active_scan_status(status: ScanStatus) -> bool:
 
 
 @router.post("/scan/{scan_token}/pause")
-def pause_scan(scan: SiteScan = Depends(get_owned_scan), db: Session = Depends(get_db)):
+def pause_scan(scan: SiteScan = Depends(get_controllable_scan), db: Session = Depends(get_db)):
     if scan.status != ScanStatus.IN_PROGRESS:
         raise HTTPException(409, "Scan is not running")
     scan.status = ScanStatus.PAUSED
@@ -99,7 +102,7 @@ def pause_scan(scan: SiteScan = Depends(get_owned_scan), db: Session = Depends(g
 
 
 @router.post("/scan/{scan_token}/resume")
-def resume_scan(scan: SiteScan = Depends(get_owned_scan), db: Session = Depends(get_db)):
+def resume_scan(scan: SiteScan = Depends(get_controllable_scan), db: Session = Depends(get_db)):
     if scan.status != ScanStatus.PAUSED:
         raise HTTPException(409, "Scan is not paused")
     scan.status = ScanStatus.IN_PROGRESS
@@ -108,7 +111,7 @@ def resume_scan(scan: SiteScan = Depends(get_owned_scan), db: Session = Depends(
 
 
 @router.post("/scan/{scan_token}/stop")
-def stop_scan(scan: SiteScan = Depends(get_owned_scan), db: Session = Depends(get_db)):
+def stop_scan(scan: SiteScan = Depends(get_controllable_scan), db: Session = Depends(get_db)):
     if not _active_scan_status(scan.status):
         raise HTTPException(409, "Scan is not active")
     scan.status = ScanStatus.CANCELLED
@@ -117,12 +120,12 @@ def stop_scan(scan: SiteScan = Depends(get_owned_scan), db: Session = Depends(ge
 
 
 @router.get("/scan/{scan_token}", response_model=ScanStatusResponse)
-def get_scan_status(scan: SiteScan = Depends(get_owned_scan)):
+def get_scan_status(scan: SiteScan = Depends(get_accessible_scan)):
     return _status_response(scan)
 
 
 @router.get("/scan/{scan_token}/results", response_model=ScanResultsResponse)
-def get_scan_results(scan: SiteScan = Depends(get_owned_scan), db: Session = Depends(get_db)):
+def get_scan_results(scan: SiteScan = Depends(get_accessible_scan), db: Session = Depends(get_db)):
     pages = (
         db.query(Page)
         .options(
@@ -153,7 +156,7 @@ def get_scan_results(scan: SiteScan = Depends(get_owned_scan), db: Session = Dep
 def get_preview(
     image_id: int,
     format: str = "image",
-    scan: SiteScan = Depends(get_owned_scan),
+    scan: SiteScan = Depends(get_accessible_scan),
     db: Session = Depends(get_db),
 ):
     image = (
@@ -201,7 +204,7 @@ def get_preview(
 
 
 @router.post("/scan/{scan_token}/report")
-def create_report(scan: SiteScan = Depends(get_owned_scan), db: Session = Depends(get_db)):
+def create_report(scan: SiteScan = Depends(get_accessible_scan), db: Session = Depends(get_db)):
     try:
         pdf = generate_scan_report(db, scan.id)
     except ValueError as exc:
@@ -217,7 +220,7 @@ def create_report(scan: SiteScan = Depends(get_owned_scan), db: Session = Depend
 def exclude_image(
     image_id: int,
     body: ExcludeImageRequest,
-    scan: SiteScan = Depends(get_owned_scan),
+    scan: SiteScan = Depends(get_owner_scan),
     db: Session = Depends(get_db),
 ):
     check = (
@@ -233,3 +236,29 @@ def exclude_image(
     check.exclusion_reason = body.reason
     db.commit()
     return {"ok": True, "image_id": image_id}
+
+
+def _share_url(scan: SiteScan) -> str:
+    # ponytail: frontend builds full URL; API returns path+query for flexibility
+    return f"/?scan={scan.token}"
+
+
+@router.post("/scan/{scan_token}/share", response_model=ShareScanResponse)
+def enable_share(scan: SiteScan = Depends(get_owner_scan), db: Session = Depends(get_db)):
+    scan.share_enabled = True
+    db.commit()
+    return ShareScanResponse(share_enabled=True, share_url=_share_url(scan))
+
+
+@router.delete("/scan/{scan_token}/share", response_model=ShareScanResponse)
+def disable_share(scan: SiteScan = Depends(get_owner_scan), db: Session = Depends(get_db)):
+    scan.share_enabled = False
+    db.commit()
+    return ShareScanResponse(share_enabled=False, share_url=_share_url(scan))
+
+
+@router.delete("/scan/{scan_token}")
+def delete_scan(scan: SiteScan = Depends(get_owner_scan), db: Session = Depends(get_db)):
+    db.delete(scan)
+    db.commit()
+    return {"ok": True}

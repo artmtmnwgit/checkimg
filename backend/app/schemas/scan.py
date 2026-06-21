@@ -27,6 +27,8 @@ class ScanStatusResponse(BaseModel):
     url: str
     status: ScanStatus
     depth: int
+    depth_reached: int = 0
+    share_enabled: bool = False
     scan_options: dict[str, Any] | None = None
     pages_scanned: int
     images_found: int
@@ -87,3 +89,8 @@ class ScanResultsResponse(BaseModel):
 
 class ExcludeImageRequest(BaseModel):
     reason: str | None = None
+
+
+class ShareScanResponse(BaseModel):
+    share_enabled: bool
+    share_url: str

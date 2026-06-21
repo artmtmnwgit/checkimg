@@ -22,6 +22,8 @@ def apply_migrations(engine: Engine) -> None:
         ("copyright_checks", "dmca_evidence", _json_type(engine)),
         ("site_scans", "user_id", "INTEGER"),
         ("site_scans", "token", "VARCHAR(64)"),
+        ("site_scans", "share_enabled", "BOOLEAN"),
+        ("site_scans", "depth_reached", "INTEGER"),
     ]
 
     with engine.begin() as conn:

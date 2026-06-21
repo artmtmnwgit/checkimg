@@ -171,3 +171,32 @@ def user_settings_from_db(raw: dict[str, Any] | None, fallback: ScanOptions) -> 
     if not raw:
         return fallback
     return ScanOptions.model_validate(raw)
+
+
+def scan_options_summary(raw: dict[str, Any] | None) -> str:
+    """One-line Russian summary for history UI."""
+    if not raw:
+        return "стандарт (.env)"
+    o = ScanOptions.model_validate(raw)
+    parts: list[str] = []
+    if not o.yandex_search and not o.match_verify and not o.ai_search:
+        parts.append("быстрый")
+    engines: list[str] = []
+    if o.google_search:
+        engines.append("Google")
+    if o.yandex_search:
+        engines.append("Яндекс")
+    if o.ai_search:
+        engines.append("AI")
+    if o.dmca_checks:
+        engines.append("DMCA")
+    if engines:
+        parts.append(", ".join(engines))
+    flt: list[str] = []
+    if o.min_file_size_kb:
+        flt.append(f"≥{o.min_file_size_kb} КБ")
+    if o.min_image_width or o.min_image_height:
+        flt.append(f"≥{o.min_image_width}×{o.min_image_height} px")
+    if flt:
+        parts.append("фильтр: " + ", ".join(flt))
+    return " · ".join(parts) if parts else "стандарт"

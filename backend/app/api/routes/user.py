@@ -7,7 +7,7 @@ from app.database import get_db
 from app.models import SiteScan, User
 from app.schemas.scan_options import ScanOptions
 from app.schemas.user import ScanHistoryItem, ScanHistoryResponse, UserSettingsResponse
-from app.services.scan_options import options_to_json, scan_options_defaults, user_settings_from_db
+from app.services.scan_options import options_to_json, public_scan_options, scan_options_defaults, scan_options_summary, user_settings_from_db
 
 router = APIRouter(prefix="/api/user", tags=["user"])
 
@@ -49,6 +49,21 @@ def list_scans(
         .all()
     )
     return ScanHistoryResponse(
-        items=[ScanHistoryItem.model_validate(s) for s in rows],
+        items=[
+            ScanHistoryItem(
+                token=s.token,
+                url=s.url,
+                status=s.status,
+                depth=s.depth,
+                pages_scanned=s.pages_scanned,
+                images_found=s.images_found,
+                images_processed=s.images_processed,
+                created_at=s.created_at,
+                options_summary=scan_options_summary(s.scan_options),
+                scan_options=public_scan_options(s.scan_options),
+                share_enabled=s.share_enabled,
+            )
+            for s in rows
+        ],
         total=total,
     )

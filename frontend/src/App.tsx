@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from "react";
 
 // ponytail: empty VITE_API_URL = same-origin (/api via nginx or vite proxy)
 const API = (import.meta.env.VITE_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
@@ -450,12 +450,17 @@ interface ScanHistoryItem {
   images_found: number;
   images_processed: number;
   created_at: string;
+  options_summary?: string;
+  share_enabled?: boolean;
 }
 
 interface ScanStatusResponse {
   token: string;
   url: string;
   status: ScanStatus;
+  depth: number;
+  depth_reached: number;
+  share_enabled: boolean;
   progress_pct: number;
   pages_scanned: number;
   images_found: number;
@@ -491,6 +496,19 @@ interface ScanResults {
 
 type Filter = "all" | "violations" | "clean";
 type ViewMode = "grid" | "table";
+type RiskSort = "default" | "risk_desc" | "risk_asc";
+
+const RISK_SORT_ORDER: Record<string, number> = {
+  danger: 0,
+  dmca_violation: 1,
+  piracy_blacklist: 2,
+  suspect: 3,
+  warning: 4,
+  dmca_protected: 5,
+  ai_generated: 6,
+  safe: 7,
+  pending: 8,
+};
 
 const ACTIVE: ScanStatus[] = ["pending", "in_progress", "paused"];
 
@@ -522,8 +540,19 @@ function persistScanToken(token: string | null, shareInUrl: boolean) {
 }
 
 function initialScanToken(): string | null {
-  if (getAuthToken()) return readScanTokenFromUrl() ?? readScanTokenFromStorage();
+  const fromUrl = readScanTokenFromUrl();
+  if (fromUrl) {
+    if (!getAuthToken()) setGuestScanToken(fromUrl);
+    return fromUrl;
+  }
+  if (getAuthToken()) return readScanTokenFromStorage();
   return getGuestScanToken();
+}
+
+function buildShareUrl(token: string): string {
+  const u = new URL(window.location.href);
+  u.searchParams.set("scan", token);
+  return u.toString();
 }
 
 function PreviewImg({
@@ -673,8 +702,10 @@ export default function App() {
   const [status, setStatus] = useState<ScanStatusResponse | null>(null);
   const [results, setResults] = useState<ScanResults | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
+  const [riskSort, setRiskSort] = useState<RiskSort>("default");
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [copyDone, setCopyDone] = useState(false);
+  const [shareCopied, setShareCopied] = useState<string | null>(null);
   const [selected, setSelected] = useState<ImageResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [controlBusy, setControlBusy] = useState(false);
@@ -847,6 +878,35 @@ export default function App() {
     setRestoredSession(true);
     setResults(null);
     setStatus(null);
+    setHistoryOpen(false);
+  };
+
+  const deleteHistoryScan = async (token: string, e: MouseEvent) => {
+    e.stopPropagation();
+    if (!confirm("Удалить проверку из истории?")) return;
+    const res = await apiFetch(`/api/scan/${token}`, { method: "DELETE" });
+    if (!res.ok) return;
+    setHistory((prev) => prev.filter((h) => h.token !== token));
+    if (scanToken === token) {
+      setScanToken(null);
+      persistScanToken(null, false);
+      setStatus(null);
+      setResults(null);
+    }
+  };
+
+  const toggleShare = async (token: string, enabled: boolean) => {
+    const res = await apiFetch(`/api/scan/${token}/share`, { method: enabled ? "POST" : "DELETE" });
+    if (!res.ok) return;
+    const data = await res.json();
+    setHistory((prev) => prev.map((h) => (h.token === token ? { ...h, share_enabled: data.share_enabled } : h)));
+    if (scanToken === token && status) setStatus({ ...status, share_enabled: data.share_enabled });
+  };
+
+  const copyShareLink = async (token: string) => {
+    await navigator.clipboard.writeText(buildShareUrl(token));
+    setShareCopied(token);
+    setTimeout(() => setShareCopied(null), 2000);
   };
 
   const startScan = async () => {
@@ -933,13 +993,16 @@ export default function App() {
   }, [results]);
 
   const filtered = useMemo(() => {
-    return flatImages.filter((img) => {
+    const list = flatImages.filter((img) => {
       const risk = img.copyright_check?.risk_level;
       if (filter === "violations") return risk && risk !== "safe";
       if (filter === "clean") return risk === "safe";
       return true;
     });
-  }, [flatImages, filter]);
+    if (riskSort === "default") return list;
+    const order = (img: FlatImage) => RISK_SORT_ORDER[img.copyright_check?.risk_level ?? "pending"] ?? 9;
+    return [...list].sort((a, b) => (riskSort === "risk_desc" ? order(a) - order(b) : order(b) - order(a)));
+  }, [flatImages, filter, riskSort]);
 
   const isActive = status && (status.status === "in_progress" || status.status === "paused");
   const pendingCount = flatImages.filter((i) => !i.copyright_check).length;
@@ -1041,13 +1104,52 @@ export default function App() {
           ) : (
             <ul className="history-list">
               {history.map((item) => (
-                <li key={item.token}>
+                <li key={item.token} className="history-row">
                   <button type="button" className="history-item" onClick={() => openHistoryScan(item.token)}>
                     <span className="history-url">{item.url}</span>
                     <span className="history-meta">
-                      {item.status} · {new Date(item.created_at).toLocaleString()}
+                      {item.status} · глубина {item.depth} · {new Date(item.created_at).toLocaleString()}
                     </span>
+                    {item.options_summary ? (
+                      <span className="history-options" title={item.options_summary}>
+                        {item.options_summary}
+                      </span>
+                    ) : null}
                   </button>
+                  <div className="history-actions">
+                    <button
+                      type="button"
+                      className="btn-icon"
+                      title={item.share_enabled ? "Отключить доступ по ссылке" : "Поделиться"}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void toggleShare(item.token, !item.share_enabled);
+                      }}
+                    >
+                      {item.share_enabled ? "🔗" : "↗"}
+                    </button>
+                    {item.share_enabled ? (
+                      <button
+                        type="button"
+                        className="btn-icon"
+                        title="Копировать ссылку"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void copyShareLink(item.token);
+                        }}
+                      >
+                        {shareCopied === item.token ? "✓" : "📋"}
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="btn-icon btn-icon-danger"
+                      title="Удалить"
+                      onClick={(e) => deleteHistoryScan(item.token, e)}
+                    >
+                      ✕
+                    </button>
+                  </div>
                 </li>
               ))}
             </ul>
@@ -1066,8 +1168,16 @@ export default function App() {
           Site URL
           <input type="url" value={url} onChange={(e) => setUrl(e.target.value)} required />
         </label>
-        <label>
-          Crawl depth ({depth})
+        <label className="depth-label">
+          <span className="depth-label-row">
+            Crawl depth ({depth})
+            <span
+              className="hint-icon"
+              title="Глубина обхода: 1 — только указанная страница; 2 — страница и ссылки с неё; 3 — ещё один уровень вглубь. Больше уровней = дольше скан и больше страниц."
+            >
+              ?
+            </span>
+          </span>
           <input
             type="range"
             min={1}
@@ -1323,10 +1433,29 @@ export default function App() {
             </span>
             <span className={`status-pill ${status.status}`}>{status.status}</span>
             <span>{status.progress_pct}%</span>
+            <span>
+              глубина {status.depth_reached}/{status.depth}
+            </span>
             <span>{status.pages_scanned} pages</span>
             <span>{status.images_processed}/{status.images_found} checked</span>
             {checkingCount > 0 && (
               <span className="pending-count checking-pulse">{checkingCount} проверяется…</span>
+            )}
+            {user && scanToken && (
+              <>
+                <button
+                  type="button"
+                  className="btn-secondary btn-sm"
+                  onClick={() => void toggleShare(scanToken, !status.share_enabled)}
+                >
+                  {status.share_enabled ? "Ссылка активна" : "Поделиться"}
+                </button>
+                {status.share_enabled ? (
+                  <button type="button" className="btn-secondary btn-sm" onClick={() => void copyShareLink(scanToken)}>
+                    {shareCopied === scanToken ? "Скопировано" : "Копировать ссылку"}
+                  </button>
+                ) : null}
+              </>
             )}
           </div>
           {isActive && status.images_found > status.images_processed && (
@@ -1379,6 +1508,14 @@ export default function App() {
               ))}
             </div>
             <div className="view-controls">
+              <label className="sort-select">
+                Сортировка
+                <select value={riskSort} onChange={(e) => setRiskSort(e.target.value as RiskSort)}>
+                  <option value="default">по порядку</option>
+                  <option value="risk_desc">риск ↓</option>
+                  <option value="risk_asc">риск ↑</option>
+                </select>
+              </label>
               <button
                 type="button"
                 className={viewMode === "grid" ? "active" : ""}

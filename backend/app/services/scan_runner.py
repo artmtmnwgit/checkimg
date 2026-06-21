@@ -334,8 +334,10 @@ def _fallback_check(image_id: int, error: str) -> None:
         db.close()
 
 
-def _sync_scan_stats(db: Session, scan: SiteScan, pages_scanned: int) -> None:
+def _sync_scan_stats(db: Session, scan: SiteScan, pages_scanned: int, depth: int = 0) -> None:
     scan.pages_scanned = pages_scanned
+    if depth:
+        scan.depth_reached = max(scan.depth_reached or 0, depth)
     db.commit()
     db.refresh(scan)
 
@@ -436,7 +438,7 @@ async def _crawl_pipeline(db: Session, scan: SiteScan) -> dict:
 
             page.status = PageStatus.SCANNED
             pages_scanned += 1
-            await asyncio.to_thread(_sync_scan_stats, db, scan, pages_scanned)
+            await asyncio.to_thread(_sync_scan_stats, db, scan, pages_scanned, depth)
 
             base_url = fetched_url
             page_dmca = extract_dmca_page_signals(html, base_url)

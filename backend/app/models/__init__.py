@@ -69,6 +69,8 @@ class SiteScan(Base):
     dmca_site_data: Mapped[dict[str, Any] | None] = mapped_column(JsonType, nullable=True)
     scan_options: Mapped[dict[str, Any] | None] = mapped_column(JsonType, nullable=True)
     token: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    share_enabled: Mapped[bool] = mapped_column(default=False, nullable=False)
+    depth_reached: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

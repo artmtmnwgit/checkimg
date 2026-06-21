@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -20,8 +21,9 @@ class ScanHistoryItem(BaseModel):
     images_found: int
     images_processed: int
     created_at: datetime
-
-    model_config = {"from_attributes": True}
+    options_summary: str = ""
+    scan_options: dict[str, Any] | None = None
+    share_enabled: bool = False
 
 
 class ScanHistoryResponse(BaseModel):

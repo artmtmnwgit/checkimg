@@ -350,6 +350,9 @@ interface ScanOptions {
   tineye: boolean;
   perplexity: boolean;
   copilot: boolean;
+  min_file_size_kb: number;
+  min_image_width: number;
+  min_image_height: number;
   gemini_api_key: string;
   huggingface_api_token: string;
   tineye_api_key: string;
@@ -478,8 +481,38 @@ const FALLBACK_SCAN_OPTIONS: ScanOptions = {
   tineye: false,
   perplexity: false,
   copilot: false,
+  min_file_size_kb: 0,
+  min_image_width: 32,
+  min_image_height: 32,
   ...EMPTY_API_KEYS,
 };
+
+function OptionSlider({
+  label,
+  value,
+  min,
+  max,
+  step,
+  unit,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  unit: string;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <label className="option-slider">
+      <span>
+        {label}: <strong>{value}</strong> {unit}
+      </span>
+      <input type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))} />
+    </label>
+  );
+}
 
 function ApiKeyField({
   show,
@@ -581,9 +614,16 @@ export default function App() {
     setScanOptions((prev) => ({ ...prev, [key]: value }));
   };
 
+  const setFilterOption = (key: "min_file_size_kb" | "min_image_width" | "min_image_height", value: number) => {
+    setScanOptions((prev) => ({ ...prev, [key]: value }));
+  };
+
   const applyPreset = (preset: ScanOptions) =>
     setScanOptions((prev) => ({
       ...preset,
+      min_file_size_kb: prev.min_file_size_kb,
+      min_image_width: prev.min_image_width,
+      min_image_height: prev.min_image_height,
       gemini_api_key: prev.gemini_api_key,
       huggingface_api_token: prev.huggingface_api_token,
       tineye_api_key: prev.tineye_api_key,
@@ -746,7 +786,7 @@ export default function App() {
           open={optionsOpen}
           onToggle={(e) => setOptionsOpen((e.target as HTMLDetailsElement).open)}
         >
-          <summary>Опции проверки (ускорение)</summary>
+          <summary>Опции проверки</summary>
           <div className="option-presets">
             <button type="button" className="preset-btn" onClick={() => applyPreset(defaultOptions)}>
               Стандарт
@@ -759,6 +799,37 @@ export default function App() {
               Быстро
             </button>
           </div>
+          <fieldset className="option-filters">
+            <legend>Фильтры изображений</legend>
+            <OptionSlider
+              label="Мин. размер файла"
+              value={scanOptions.min_file_size_kb}
+              min={0}
+              max={500}
+              step={5}
+              unit="КБ"
+              onChange={(v) => setFilterOption("min_file_size_kb", v)}
+            />
+            <OptionSlider
+              label="Мин. ширина"
+              value={scanOptions.min_image_width}
+              min={0}
+              max={2000}
+              step={10}
+              unit="px"
+              onChange={(v) => setFilterOption("min_image_width", v)}
+            />
+            <OptionSlider
+              label="Мин. высота"
+              value={scanOptions.min_image_height}
+              min={0}
+              max={2000}
+              step={10}
+              unit="px"
+              onChange={(v) => setFilterOption("min_image_height", v)}
+            />
+            <p className="option-hint">0 = без ограничения (кроме иконок 80 байт). По умолчанию 32×32 px.</p>
+          </fieldset>
           <div className="option-grid">
             <fieldset>
               <legend>Обратный поиск</legend>

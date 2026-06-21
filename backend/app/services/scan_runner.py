@@ -14,7 +14,9 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import SessionLocal
 from app.models import CopyrightCheck, Image, Page, PageStatus, RiskLevel, SiteScan
-from app.services.scan_options import EffectiveScanOptions, ScanSecrets
+from app.services.copyright_checker import gather_external_evidence, persist_copyright_check
+from app.services.image_filters import passes_dimension_filter
+from app.services.scan_options import EffectiveScanOptions, ScanImageFilters, ScanSecrets
 from app.services.dmca_crawl import extract_dmca_page_signals, merge_dmca_signals
 from app.services.dmca_domain import check_site_domain_dmca
 from app.services.dmca_site_crawl import crawl_site_dmca_signals
@@ -26,6 +28,7 @@ from app.services.html_parser import (
 )
 from app.services.scan_control import check_control
 from app.services.sanitize import sanitize_json
+from app.services.url_clean import canonical_page_url
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -146,6 +149,7 @@ async def _download_image(
     sem: asyncio.Semaphore,
     url: str,
     dest: Path,
+    filters: ScanImageFilters,
 ) -> tuple[str, str | None]:
     async with sem:
         try:
@@ -153,12 +157,36 @@ async def _download_image(
                 if resp.status != 200:
                     return url, None
                 data = await _read_limited(resp, settings.crawl_max_image_bytes)
-                if not data or len(data) < 80:
+                floor = max(80, filters.min_file_size_bytes)
+                if not data or len(data) < floor:
                     return url, None
                 ctype = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
                 if ctype and not ctype.startswith(IMAGE_CONTENT_PREFIX):
                     if not data[:12].startswith(IMAGE_MAGIC):
                         return url, None
+                if filters.min_image_width > 0 or filters.min_image_height > 0:
+                    try:
+                        from io import BytesIO
+
+                        from PIL import Image
+
+                        w, h = Image.open(BytesIO(data)).size
+                        if not passes_dimension_filter(
+                            min_w=filters.min_image_width,
+                            min_h=filters.min_image_height,
+                            url=url,
+                            pixel_w=w,
+                            pixel_h=h,
+                        ):
+                            return url, None
+                    except Exception:
+                        if not passes_dimension_filter(
+                            min_w=filters.min_image_width,
+                            min_h=filters.min_image_height,
+                            url=url,
+                            file_bytes=data,
+                        ):
+                            return url, None
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_bytes(data)
                 return url, hashlib.sha256(data).hexdigest()
@@ -313,10 +341,14 @@ def _sync_scan_stats(db: Session, scan: SiteScan, pages_scanned: int) -> None:
 
 
 async def _crawl_pipeline(db: Session, scan: SiteScan) -> dict:
-    root = str(scan.url).strip()
+    root = canonical_page_url(str(scan.url).strip())
     site_domain = domain_of(root)
     max_depth = scan.depth
-    seen_pages: set[str] = set()
+    seen_pages: set[str] = {
+        canonical_page_url(u)
+        for (u,) in db.query(Page.url).filter(Page.scan_id == scan.id).all()
+    }
+    pending_pages: set[str] = {root}
     queue: deque[tuple[str, int]] = deque([(root, 0)])
     pages_scanned = 0
     pages_failed = 0
@@ -326,6 +358,7 @@ async def _crawl_pipeline(db: Session, scan: SiteScan) -> dict:
     sem = asyncio.Semaphore(settings.crawl_concurrency)
     opts = EffectiveScanOptions.for_scan(scan)
     secrets = ScanSecrets.for_scan(scan)
+    img_filters = ScanImageFilters.for_scan(scan)
 
     async with aiohttp.ClientSession(headers=BROWSER_HEADERS) as session:
         check_sem = asyncio.Semaphore(settings.check_concurrency)
@@ -355,23 +388,35 @@ async def _crawl_pipeline(db: Session, scan: SiteScan) -> dict:
             "caches": caches,
             "opts": opts,
             "secrets": secrets,
+            "img_filters": img_filters,
         }
 
         while queue and pages_scanned < settings.crawl_max_pages:
             await asyncio.to_thread(check_control, db, scan.id)
 
             url, depth = queue.popleft()
-            if url in seen_pages:
+            canon = canonical_page_url(url)
+            pending_pages.discard(canon)
+            if canon in seen_pages:
                 continue
-            seen_pages.add(url)
+            seen_pages.add(canon)
 
-            logger.info("scan %s: page %s (depth %s)", scan.id, url, depth)
-            html, fetched_url = await _fetch_text(session, url)
+            logger.info("scan %s: page %s (depth %s)", scan.id, canon, depth)
+            html, fetched_url = await _fetch_text(session, canon)
             css_chunks = await _fetch_css_batch(session, html, fetched_url) if html else []
 
-            page = Page(scan_id=scan.id, url=url, status=PageStatus.PENDING)
+            page = Page(scan_id=scan.id, url=canon, status=PageStatus.PENDING)
             db.add(page)
-            db.flush()
+            try:
+                db.flush()
+            except Exception as exc:
+                from sqlalchemy.exc import IntegrityError
+
+                if isinstance(exc, IntegrityError):
+                    db.rollback()
+                    logger.info("scan %s: skip duplicate page %s", scan.id, canon)
+                    continue
+                raise
 
             if not html:
                 page.status = PageStatus.FAILED
@@ -380,11 +425,11 @@ async def _crawl_pipeline(db: Session, scan: SiteScan) -> dict:
                 db.commit()
                 continue
 
-            if url == root and domain_of(fetched_url) != site_domain:
+            if canon == root and domain_of(fetched_url) != site_domain:
                 page.status = PageStatus.FAILED
                 pages_failed += 1
                 fetch_errors.append(
-                    f"{url} перенаправляет на {fetched_url} — укажите целевой URL напрямую"
+                    f"{canon} перенаправляет на {fetched_url} — укажите целевой URL напрямую"
                 )
                 db.commit()
                 continue
@@ -397,7 +442,13 @@ async def _crawl_pipeline(db: Session, scan: SiteScan) -> dict:
             page_dmca = extract_dmca_page_signals(html, base_url)
             if scan.dmca_site_data:
                 scan.dmca_site_data = sanitize_json(merge_dmca_signals(scan.dmca_site_data, page_dmca))
-            img_urls = extract_image_urls(html, base_url, extra_css=css_chunks)
+            img_urls = extract_image_urls(
+                html,
+                base_url,
+                extra_css=css_chunks,
+                min_image_width=img_filters.min_image_width,
+                min_image_height=img_filters.min_image_height,
+            )
             img_urls = [u for u in img_urls if u not in seen_images][: settings.crawl_max_images_per_page]
 
             jobs: list[tuple[str, Path]] = []
@@ -410,7 +461,10 @@ async def _crawl_pipeline(db: Session, scan: SiteScan) -> dict:
 
             if jobs:
                 check_tasks: list[asyncio.Task] = []
-                tasks = [asyncio.create_task(_download_image(session, sem, u, p)) for u, p in jobs]
+                tasks = [
+                    asyncio.create_task(_download_image(session, sem, u, p, ctx["img_filters"]))
+                    for u, p in jobs
+                ]
                 for coro in asyncio.as_completed(tasks):
                     await asyncio.to_thread(check_control, db, scan.id)
                     item = await coro
@@ -433,8 +487,10 @@ async def _crawl_pipeline(db: Session, scan: SiteScan) -> dict:
 
             if depth < max_depth:
                 for link in extract_page_links(html, base_url, site_domain):
-                    if link not in seen_pages:
-                        queue.append((link, depth + 1))
+                    lc = canonical_page_url(link)
+                    if lc not in seen_pages and lc not in pending_pages:
+                        queue.append((lc, depth + 1))
+                        pending_pages.add(lc)
 
     error: str | None = None
     if pages_scanned == 0:

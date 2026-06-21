@@ -1,4 +1,4 @@
-from app.services.url_clean import clean_http_url
+from app.services.url_clean import canonical_page_url, clean_http_url
 
 
 def _self_check() -> None:
@@ -13,6 +13,10 @@ def _self_check() -> None:
         "https://image.shutterstock.com/image-photo/chef-260nw-605801360.jpg&amp;quot"
     ) == "https://image.shutterstock.com/image-photo/chef-260nw-605801360.jpg"
     assert clean_http_url("not a url") is None
+
+    assert canonical_page_url("https://www.englishnanny.org") == "https://englishnanny.org/"
+    assert canonical_page_url("https://englishnanny.org/") == "https://englishnanny.org/"
+    assert canonical_page_url("https://englishnanny.org/about/") == "https://englishnanny.org/about"
 
 
 if __name__ == "__main__":

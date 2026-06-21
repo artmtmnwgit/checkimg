@@ -16,6 +16,12 @@ SCAN_TOGGLES = (
     "copilot",
 )
 
+SCAN_FILTERS = (
+    "min_file_size_kb",
+    "min_image_width",
+    "min_image_height",
+)
+
 SCAN_API_KEYS = (
     "gemini_api_key",
     "huggingface_api_token",
@@ -41,6 +47,9 @@ class ScanOptions(BaseModel):
     tineye: bool = False
     perplexity: bool = False
     copilot: bool = False
+    min_file_size_kb: int = Field(default=0, ge=0, le=10_240)
+    min_image_width: int = Field(default=32, ge=0, le=8000)
+    min_image_height: int = Field(default=32, ge=0, le=8000)
     gemini_api_key: str = ""
     huggingface_api_token: str = ""
     tineye_api_key: str = ""

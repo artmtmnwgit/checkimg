@@ -16,6 +16,7 @@ from app.services.metadata import extract_exif
 from app.services.reverse_image_search import multi_engine_reverse_search
 from app.services.scan_control import check_control
 from app.services.scan_options import EffectiveScanOptions, ScanSecrets
+from app.services.search_fusion import aggregate_fusion_risk
 from app.services.sanitize import sanitize_json
 from app.services.source_types import DANGER_SITE_TYPES, WARNING_SITE_TYPES
 from app.services.url_clean import clean_http_url

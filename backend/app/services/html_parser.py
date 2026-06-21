@@ -6,6 +6,7 @@ from urllib.parse import urljoin, urlparse
 
 from selectolax.parser import HTMLParser
 
+from app.services.image_filters import is_raster_too_small, parse_dimensions_from_url
 from app.services.url_clean import clean_http_url
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".avif", ".jxl"}
@@ -120,26 +121,76 @@ def _parse_srcset(value: str, base: str) -> list[str]:
     return urls
 
 
-def _add(found: set[str], base: str, raw: str | None, *, skip_tiny: bool = False, w: str = "", h: str = "") -> None:
+def _skip_tiny(width: str, height: str, *, min_w: int = MIN_DIMENSION, min_h: int = MIN_DIMENSION) -> bool:
+    try:
+        w, h = int(str(width).replace("px", "")), int(str(height).replace("px", ""))
+        if min_w <= 0 and min_h <= 0:
+            return False
+        mw = min_w if min_w > 0 else 0
+        mh = min_h if min_h > 0 else 0
+        if mw and mh:
+            return w < mw or h < mh
+        if mw:
+            return w < mw
+        return h < mh
+    except (TypeError, ValueError):
+        return False
+
+
+def _add(
+    found: set[str],
+    base: str,
+    raw: str | None,
+    *,
+    skip_tiny: bool = False,
+    w: str = "",
+    h: str = "",
+    min_w: int = MIN_DIMENSION,
+    min_h: int = MIN_DIMENSION,
+) -> None:
     if not raw:
         return
     url = _normalize_url(base, raw)
     if not url or not _is_image_candidate(url):
         return
-    if skip_tiny and _skip_tiny(w, h):
+    if skip_tiny and _skip_tiny(w, h, min_w=min_w, min_h=min_h):
         return
+    url_dims = parse_dimensions_from_url(url)
+    if url_dims and is_raster_too_small(url_dims[0], url_dims[1], min_w=min_w, min_h=min_h):
+        return
+    if (min_w > 0 or min_h > 0) and url.lower().split("?", 1)[0].endswith(".svg"):
+        if not url_dims or is_raster_too_small(url_dims[0], url_dims[1], min_w=min_w, min_h=min_h):
+            return
     found.add(url)
 
 
-def _add_srcset(found: set[str], base: str, value: str | None) -> None:
+def _add_srcset(
+    found: set[str],
+    base: str,
+    value: str | None,
+    *,
+    min_w: int = MIN_DIMENSION,
+    min_h: int = MIN_DIMENSION,
+) -> None:
     if not value:
         return
     for url in _parse_srcset(value, base):
-        if _is_image_candidate(url):
-            found.add(url)
+        if not _is_image_candidate(url):
+            continue
+        url_dims = parse_dimensions_from_url(url)
+        if url_dims and is_raster_too_small(url_dims[0], url_dims[1], min_w=min_w, min_h=min_h):
+            continue
+        found.add(url)
 
 
-def _collect_from_node(found: set[str], base: str, node) -> None:
+def _collect_from_node(
+    found: set[str],
+    base: str,
+    node,
+    *,
+    min_w: int = MIN_DIMENSION,
+    min_h: int = MIN_DIMENSION,
+) -> None:
     attrs = node.attributes or {}
     tag = node.tag.lower() if node.tag else ""
 
@@ -148,13 +199,13 @@ def _collect_from_node(found: set[str], base: str, node) -> None:
     if tag == "img":
         for attr in URL_ATTRS:
             if attr in attrs:
-                _add(found, base, attrs[attr], skip_tiny=(attr == "src"), w=w, h=h)
+                _add(found, base, attrs[attr], skip_tiny=True, w=w, h=h, min_w=min_w, min_h=min_h)
         for attr in SRCSET_ATTRS:
-            _add_srcset(found, base, attrs.get(attr))
+            _add_srcset(found, base, attrs.get(attr), min_w=min_w, min_h=min_h)
 
     elif tag == "source":
-        _add(found, base, attrs.get("src"))
-        _add_srcset(found, base, attrs.get("srcset"))
+        _add(found, base, attrs.get("src"), min_w=min_w, min_h=min_h)
+        _add_srcset(found, base, attrs.get("srcset"), min_w=min_w, min_h=min_h)
 
     elif tag == "video":
         _add(found, base, attrs.get("poster"))
@@ -184,9 +235,9 @@ def _collect_from_node(found: set[str], base: str, node) -> None:
             continue
         if attr.startswith("data-") and attr not in SRCSET_ATTRS:
             if "srcset" in attr or "set" in attr:
-                _add_srcset(found, base, val)
+                _add_srcset(found, base, val, min_w=min_w, min_h=min_h)
             elif any(k in attr for k in ("src", "img", "image", "photo", "thumb", "bg", "url", "lazy", "zoom", "large")):
-                _add(found, base, val)
+                _add(found, base, val, min_w=min_w, min_h=min_h)
         if attr == "style":
             for match in BG_IMAGE_RE.finditer(val):
                 _add(found, base, match.group(1))
@@ -237,39 +288,54 @@ def _node_str(node, attr: str) -> str:
     return val() if callable(val) else str(val)
 
 
-def _extract_noscript_images(html_fragment: str, base_url: str, found: set[str]) -> None:
+def _extract_noscript_images(
+    html_fragment: str,
+    base_url: str,
+    found: set[str],
+    *,
+    min_w: int = MIN_DIMENSION,
+    min_h: int = MIN_DIMENSION,
+) -> None:
     """Parse <noscript> inner HTML without re-entering noscript (avoids recursion)."""
     tree = HTMLParser(html_fragment)
     for node in tree.css("img, source"):
-        _collect_from_node(found, base_url, node)
+        _collect_from_node(found, base_url, node, min_w=min_w, min_h=min_h)
 
 
-def extract_image_urls(html: str, base_url: str, extra_css: list[str] | None = None) -> list[str]:
+def extract_image_urls(
+    html: str,
+    base_url: str,
+    extra_css: list[str] | None = None,
+    *,
+    min_image_width: int = MIN_DIMENSION,
+    min_image_height: int = MIN_DIMENSION,
+) -> list[str]:
+    min_w, min_h = min_image_width, min_image_height
     tree = HTMLParser(html)
     found: set[str] = set()
 
     for node in tree.css("img, source, picture source, video, link, meta, input, a"):
-        _collect_from_node(found, base_url, node)
+        _collect_from_node(found, base_url, node, min_w=min_w, min_h=min_h)
 
     # background-image on div/section/etc.
     for node in tree.css("[style]"):
-        _collect_from_node(found, base_url, node)
+        _collect_from_node(found, base_url, node, min_w=min_w, min_h=min_h)
 
     # lazyload on non-img elements (div data-bg, span data-background, etc.)
     for node in tree.css("[data-src], [data-srcset], [data-lazy-src], [data-original], [data-bg], [data-background]"):
         if (node.tag or "").lower() not in ("img", "source"):
-            _collect_from_node(found, base_url, node)
+            _collect_from_node(found, base_url, node, min_w=min_w, min_h=min_h)
 
     # picture wraps source — also walk picture containers
     for node in tree.css("picture"):
         for child in node.iter():
-            _collect_from_node(found, base_url, child)
+            _collect_from_node(found, base_url, child, min_w=min_w, min_h=min_h)
 
     # lazyload fallbacks: real <img> often duplicated inside <noscript>
     for node in tree.css("noscript"):
         inner = _node_str(node, "html") or _node_str(node, "text")
         if inner:
-            _extract_noscript_images(inner, base_url, found)
+            _extract_noscript_images(inner, base_url, found, min_w=min_w, min_h=min_h)
 
     for node in tree.css("style"):
         css = _node_str(node, "text") or _node_str(node, "html")
@@ -312,14 +378,6 @@ def extract_page_links(html: str, base_url: str, same_domain: str) -> set[str]:
         if parsed.netloc == same_domain and parsed.scheme in ("http", "https", ""):
             links.add(href.split("#")[0])
     return links
-
-
-def _skip_tiny(width: str, height: str) -> bool:
-    try:
-        w, h = int(str(width).replace("px", "")), int(str(height).replace("px", ""))
-        return w < MIN_DIMENSION and h < MIN_DIMENSION
-    except (TypeError, ValueError):
-        return False
 
 
 def domain_of(url: str) -> str:

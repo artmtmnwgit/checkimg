@@ -71,3 +71,16 @@ def clean_http_url(raw: str) -> str | None:
 
     clean = urlunparse((parsed.scheme.lower(), netloc, path, "", query, ""))
     return clean if clean.startswith("http") else None
+
+
+def canonical_page_url(url: str) -> str:
+    """Normalize page URL for dedup: lower host, homepage slash, no trailing slash elsewhere."""
+    cleaned = clean_http_url(url) or url.strip()
+    parsed = urlparse(cleaned)
+    if not parsed.netloc:
+        return cleaned
+    path = (parsed.path or "").rstrip("/") or "/"
+    netloc = parsed.netloc.lower()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    return urlunparse((parsed.scheme.lower(), netloc, path, "", parsed.query, ""))

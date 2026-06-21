@@ -5,7 +5,37 @@ from typing import Any
 
 from app.config import get_settings
 from app.models import SiteScan
-from app.schemas.scan_options import SCAN_API_KEYS, SCAN_TOGGLES, KeysConfigured, ScanOptions
+from app.schemas.scan_options import SCAN_API_KEYS, SCAN_FILTERS, SCAN_TOGGLES, KeysConfigured, ScanOptions
+
+
+@dataclass(frozen=True)
+class ScanImageFilters:
+    min_file_size_kb: int = 0
+    min_image_width: int = 32
+    min_image_height: int = 32
+
+    @property
+    def min_file_size_bytes(self) -> int:
+        return self.min_file_size_kb * 1024
+
+    @classmethod
+    def from_settings(cls) -> "ScanImageFilters":
+        return cls()
+
+    @classmethod
+    def from_model(cls, model: ScanOptions) -> "ScanImageFilters":
+        return cls(
+            min_file_size_kb=model.min_file_size_kb,
+            min_image_width=model.min_image_width,
+            min_image_height=model.min_image_height,
+        )
+
+    @classmethod
+    def for_scan(cls, scan: SiteScan | None) -> "ScanImageFilters":
+        raw = getattr(scan, "scan_options", None) if scan else None
+        if raw:
+            return cls.from_model(ScanOptions.model_validate(raw))
+        return cls.from_settings()
 
 
 @dataclass(frozen=True)

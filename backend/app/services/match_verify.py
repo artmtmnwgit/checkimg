@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from app.config import get_settings
 from app.services.scan_options import EffectiveScanOptions
 from app.services.image_similarity import compare_image_bytes
 

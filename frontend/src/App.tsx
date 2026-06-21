@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from "react";
 
 // ponytail: empty VITE_API_URL = same-origin (/api via nginx or vite proxy)
 const API = (import.meta.env.VITE_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
@@ -530,6 +530,25 @@ const RISK_SORT_ORDER: Record<string, number> = {
 };
 
 const ACTIVE: ScanStatus[] = ["pending", "in_progress", "paused"];
+const POLL_ACTIVE_MS = 2500;
+const POLL_BOOT_MS = 500;
+
+/** ponytail: session-scoped blob URLs — avoids re-fetching previews on every poll re-render */
+const previewBlobCache = new Map<string, string>();
+
+function statusFingerprint(s: ScanStatusResponse): string {
+  return `${s.status}|${s.progress_pct}|${s.pages_scanned}|${s.images_found}|${s.images_processed}|${s.depth_reached}`;
+}
+
+function resultsFingerprint(r: ScanResults): string {
+  let fp = `${r.status}|${r.pages.length}|`;
+  for (const p of r.pages) {
+    for (const img of p.images) {
+      fp += `${img.id}:${img.copyright_check?.risk_level ?? "p"};`;
+    }
+  }
+  return fp;
+}
 
 function readScanTokenFromUrl(): string | null {
   const raw = new URLSearchParams(window.location.search).get("scan");
@@ -574,7 +593,7 @@ function buildShareUrl(token: string): string {
   return u.toString();
 }
 
-function PreviewImg({
+const PreviewImg = memo(function PreviewImg({
   scanToken,
   imageId,
   alt,
@@ -585,9 +604,15 @@ function PreviewImg({
   alt?: string;
   className?: string;
 }) {
-  const [src, setSrc] = useState<string | null>(null);
+  const cacheKey = `${scanToken}:${imageId}`;
+  const [src, setSrc] = useState<string | null>(() => previewBlobCache.get(cacheKey) ?? null);
 
   useEffect(() => {
+    const cached = previewBlobCache.get(cacheKey);
+    if (cached) {
+      setSrc(cached);
+      return;
+    }
     let blobUrl: string | null = null;
     let cancelled = false;
     scanFetch(`/api/preview/${scanToken}/${imageId}`)
@@ -595,18 +620,55 @@ function PreviewImg({
       .then((blob) => {
         if (!blob || cancelled) return;
         blobUrl = URL.createObjectURL(blob);
+        previewBlobCache.set(cacheKey, blobUrl);
         setSrc(blobUrl);
       })
-      .catch(() => setSrc(null));
+      .catch(() => {
+        if (!cancelled) setSrc(null);
+      });
     return () => {
       cancelled = true;
-      if (blobUrl) URL.revokeObjectURL(blobUrl);
+      // ponytail: keep blob in cache; do not revoke on unmount
     };
-  }, [scanToken, imageId]);
+  }, [cacheKey, scanToken, imageId]);
 
   if (!src) return <div className={`preview-placeholder ${className ?? ""}`} />;
-  return <img src={src} alt={alt ?? ""} className={className} />;
-}
+  return <img src={src} alt={alt ?? ""} className={className} loading="lazy" decoding="async" />;
+});
+
+const ImageGridCard = memo(function ImageGridCard({
+  scanToken,
+  img,
+  isNew,
+  onSelect,
+}: {
+  scanToken: string;
+  img: FlatImage;
+  isNew: boolean;
+  onSelect: (img: ImageResult) => void;
+}) {
+  const checked = !!img.copyright_check;
+  const risk = img.copyright_check?.risk_level ?? "pending";
+  const flagged = checked && risk !== "safe";
+  return (
+    <article
+      className={`card ${risk}${isNew ? " card-new" : ""}${!checked ? " card-checking" : ""}`}
+      onClick={() => checked && onSelect(img)}
+      title={flagged ? getReasons(img.copyright_check).join("\n") : checked ? undefined : "Проверяется…"}
+    >
+      <PreviewImg scanToken={scanToken} imageId={img.id} alt={img.alt_text ?? ""} />
+      <div className="card-body">
+        <span className={`badge ${risk}`}>
+          {checked ? (RISK_LABELS[risk as RiskLevel] ?? risk) : "checking…"}
+        </span>
+        {flagged && (
+          <p className="card-hint">{getReasons(img.copyright_check)[0] ?? "Подозрительное изображение"}</p>
+        )}
+        <p className="card-url">{img.src_url.slice(0, 80)}…</p>
+      </div>
+    </article>
+  );
+});
 
 const EMPTY_API_KEYS = {
   gemini_api_key: "",
@@ -729,6 +791,14 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [controlBusy, setControlBusy] = useState(false);
   const knownIds = useRef<Set<number>>(new Set());
+  const statusRef = useRef<ScanStatusResponse | null>(null);
+  const pollMetaRef = useRef({
+    statusFp: "",
+    resultsFp: "",
+    images_found: -1,
+    images_processed: -1,
+    lastStatus: "" as ScanStatus | "",
+  });
 
   const [user, setUser] = useState<UserInfo | null>(null);
   const [authOpen, setAuthOpen] = useState(false);
@@ -902,7 +972,11 @@ export default function App() {
     setResults(null);
     setStatus(null);
     setHistoryOpen(false);
+    pollMetaRef.current = { statusFp: "", resultsFp: "", images_found: -1, images_processed: -1, lastStatus: "" };
+    knownIds.current = new Set();
   };
+
+  const selectImage = useCallback((img: ImageResult) => setSelected(img), []);
 
   const deleteHistoryScan = async (token: string, e: MouseEvent) => {
     e.stopPropagation();
@@ -942,6 +1016,8 @@ export default function App() {
     setGuestScanToken(null);
     persistScanToken(null, false);
     knownIds.current = new Set();
+    pollMetaRef.current = { statusFp: "", resultsFp: "", images_found: -1, images_processed: -1, lastStatus: "" };
+    previewBlobCache.clear();
     try {
       const res = await scanFetch("/api/scan", {
         method: "POST",
@@ -971,8 +1047,8 @@ export default function App() {
     }
   };
 
-  const poll = useCallback(async () => {
-    if (!scanToken) return;
+  const poll = useCallback(async (): Promise<boolean> => {
+    if (!scanToken) return false;
     const res = await scanFetch(`/api/scan/${scanToken}`);
     if (res.status === 404 || res.status === 403) {
       persistScanToken(null, Boolean(user));
@@ -981,19 +1057,49 @@ export default function App() {
       setStatus(null);
       setResults(null);
       setRestoredSession(false);
-      return;
+      statusRef.current = null;
+      return false;
     }
     const s: ScanStatusResponse = await res.json();
-    setStatus(s);
+    statusRef.current = s;
 
-    const live = ACTIVE.includes(s.status) || s.status === "cancelled";
-    if (live || s.status === "done" || s.status === "failed") {
-      const r: ScanResults = await scanFetch(`/api/scan/${scanToken}/results`).then((res) => res.json());
-      setResults(r);
+    const sfp = statusFingerprint(s);
+    if (sfp !== pollMetaRef.current.statusFp) {
+      pollMetaRef.current.statusFp = sfp;
+      setStatus(s);
     }
+
+    const meta = pollMetaRef.current;
+    const needResults =
+      ACTIVE.includes(s.status) ||
+      s.status === "done" ||
+      s.status === "failed" ||
+      s.status === "cancelled";
+
+    const shouldFetchResults =
+      needResults &&
+      (meta.images_found !== s.images_found ||
+        meta.images_processed !== s.images_processed ||
+        s.status !== meta.lastStatus ||
+        !meta.resultsFp);
+
+    if (shouldFetchResults) {
+      const r: ScanResults = await scanFetch(`/api/scan/${scanToken}/results`).then((r) => r.json());
+      const rfp = resultsFingerprint(r);
+      if (rfp !== meta.resultsFp) {
+        meta.resultsFp = rfp;
+        setResults(r);
+      }
+      meta.images_found = s.images_found;
+      meta.images_processed = s.images_processed;
+      meta.lastStatus = s.status;
+    }
+
     if (!ACTIVE.includes(s.status)) {
       setRestoredSession(false);
     }
+
+    return ACTIVE.includes(s.status);
   }, [scanToken, user]);
 
   useEffect(() => {
@@ -1002,11 +1108,26 @@ export default function App() {
 
   useEffect(() => {
     if (!scanToken) return;
-    poll();
-    const ms = status && ACTIVE.includes(status.status) ? 800 : 2000;
-    const t = setInterval(poll, ms);
-    return () => clearInterval(t);
-  }, [scanToken, poll, status?.status]);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const loop = async () => {
+      if (cancelled) return;
+      const keepGoing = await poll();
+      if (cancelled || !keepGoing) return;
+      timer = setTimeout(loop, POLL_ACTIVE_MS);
+    };
+
+    void poll().then((keepGoing) => {
+      if (cancelled || !keepGoing) return;
+      timer = setTimeout(loop, POLL_BOOT_MS);
+    });
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [scanToken, poll]);
 
   const flatImages = useMemo(() => {
     if (!results) return [];
@@ -1562,29 +1683,16 @@ export default function App() {
           {viewMode === "grid" ? (
           <div className="grid">
             {filtered.map((img) => {
-              const checked = !!img.copyright_check;
-              const risk = img.copyright_check?.risk_level ?? "pending";
               const isNew = !knownIds.current.has(img.id);
-              knownIds.current.add(img.id);
-              const flagged = checked && risk !== "safe";
+              if (isNew) knownIds.current.add(img.id);
               return (
-                <article
+                <ImageGridCard
                   key={img.id}
-                  className={`card ${risk}${isNew ? " card-new" : ""}${!checked ? " card-checking" : ""}`}
-                  onClick={() => checked && setSelected(img)}
-                  title={flagged ? getReasons(img.copyright_check).join("\n") : checked ? undefined : "Проверяется…"}
-                >
-                  <PreviewImg scanToken={results.scan_token} imageId={img.id} alt={img.alt_text ?? ""} />
-                  <div className="card-body">
-                    <span className={`badge ${risk}`}>
-                      {checked ? (RISK_LABELS[risk as RiskLevel] ?? risk) : "checking…"}
-                    </span>
-                    {flagged && (
-                      <p className="card-hint">{getReasons(img.copyright_check)[0] ?? "Подозрительное изображение"}</p>
-                    )}
-                    <p className="card-url">{img.src_url.slice(0, 80)}…</p>
-                  </div>
-                </article>
+                  scanToken={results.scan_token}
+                  img={img}
+                  isNew={isNew}
+                  onSelect={selectImage}
+                />
               );
             })}
           </div>

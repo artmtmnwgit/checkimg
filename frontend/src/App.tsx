@@ -49,6 +49,25 @@ function scanAccessHeaders(extra?: HeadersInit): HeadersInit {
   return { ...extra };
 }
 
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    /* ponytail: clipboard blocked on http — fall through */
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.cssText = "position:fixed;left:-9999px";
+  document.body.appendChild(ta);
+  ta.select();
+  const ok = document.execCommand("copy");
+  document.body.removeChild(ta);
+  return ok;
+}
+
 async function apiFetch(path: string, init?: RequestInit) {
   return fetch(`${API}${path}`, {
     ...init,
@@ -732,10 +751,14 @@ export default function App() {
   }, []);
 
   const loadHistory = useCallback(async () => {
-    const res = await apiFetch("/api/user/scans");
-    if (!res.ok) return;
-    const data = await res.json();
-    setHistory(data.items ?? []);
+    try {
+      const res = await apiFetch("/api/user/scans");
+      if (!res.ok) return;
+      const data = await res.json();
+      setHistory(data.items ?? []);
+    } catch {
+      /* ponytail: network/CORS — ignore on bootstrap */
+    }
   }, []);
 
   const bootstrapAuth = useCallback(async () => {
@@ -904,7 +927,7 @@ export default function App() {
   };
 
   const copyShareLink = async (token: string) => {
-    await navigator.clipboard.writeText(buildShareUrl(token));
+    await copyText(buildShareUrl(token));
     setShareCopied(token);
     setTimeout(() => setShareCopied(null), 2000);
   };
@@ -1011,7 +1034,7 @@ export default function App() {
 
   const copyTable = async () => {
     const tsv = buildTableTsv(filtered);
-    await navigator.clipboard.writeText(tsv);
+    await copyText(tsv);
     setCopyDone(true);
     setTimeout(() => setCopyDone(false), 2000);
   };

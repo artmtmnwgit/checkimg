@@ -22,8 +22,8 @@ def apply_migrations(engine: Engine) -> None:
         ("copyright_checks", "dmca_evidence", _json_type(engine)),
         ("site_scans", "user_id", "INTEGER"),
         ("site_scans", "token", "VARCHAR(64)"),
-        ("site_scans", "share_enabled", "BOOLEAN"),
-        ("site_scans", "depth_reached", "INTEGER"),
+        ("site_scans", "share_enabled", "BOOLEAN NOT NULL DEFAULT FALSE"),
+        ("site_scans", "depth_reached", "INTEGER NOT NULL DEFAULT 0"),
     ]
 
     with engine.begin() as conn:
@@ -41,6 +41,7 @@ def apply_migrations(engine: Engine) -> None:
             conn.execute(text(ddl))
 
         _backfill_scan_tokens(conn)
+        _backfill_scan_columns(conn)
 
         if dialect == "postgresql":
             _fix_pg_sequences(conn)
@@ -57,6 +58,18 @@ def _backfill_scan_tokens(conn) -> None:
         )
     if rows:
         logger.info("migration: backfilled %s scan token(s)", len(rows))
+
+
+def _backfill_scan_columns(conn) -> None:
+    """Fix NULLs from columns added without NOT NULL/DEFAULT."""
+    n1 = conn.execute(
+        text("UPDATE site_scans SET share_enabled = FALSE WHERE share_enabled IS NULL")
+    ).rowcount
+    n2 = conn.execute(
+        text("UPDATE site_scans SET depth_reached = 0 WHERE depth_reached IS NULL")
+    ).rowcount
+    if n1 or n2:
+        logger.info("migration: backfilled share_enabled=%s depth_reached=%s", n1, n2)
 
 
 def _fix_pg_sequences(conn) -> None:

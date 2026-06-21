@@ -48,7 +48,7 @@ def _status_response(scan: SiteScan) -> ScanStatusResponse:
         status=scan.status,
         depth=scan.depth,
         depth_reached=scan.depth_reached or 0,
-        share_enabled=scan.share_enabled,
+        share_enabled=bool(scan.share_enabled),
         scan_options=public_scan_options(scan.scan_options),
         pages_scanned=scan.pages_scanned,
         images_found=scan.images_found,

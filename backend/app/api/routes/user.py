@@ -61,7 +61,7 @@ def list_scans(
                 created_at=s.created_at,
                 options_summary=scan_options_summary(s.scan_options),
                 scan_options=public_scan_options(s.scan_options),
-                share_enabled=s.share_enabled,
+                share_enabled=bool(s.share_enabled),
             )
             for s in rows
         ],

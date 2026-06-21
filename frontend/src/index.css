@@ -670,6 +670,8 @@ header h1 {
 }
 
 .card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 260px;
   background: #fff;
   border-radius: 8px;
   overflow: hidden;
